@@ -1,0 +1,133 @@
+name: Build Android Kernel (obiwan)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARCH: arm64
+  KBUILD_OUTPUT: out
+  JOBS: ${{ runner.cores }}
+  CROSS_COMPILE: aarch64-linux-gnu-
+  DEFCONFIG: obiwan_defconfig
+  RAMDISK_PATH: ramdisk
+  CMDLINE: "console=tty0"
+  BASE: "0x10000000"
+  PAGESIZE: "4096"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc flex bison libssl-dev libncurses5-dev \
+            ccache curl wget unzip python3 python3-pip \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            abootimg
+
+      - name: Prepare environment
+        run: |
+          mkdir -p ${KBUILD_OUTPUT}
+          echo "Using defconfig: ${DEFCONFIG}"
+
+      - name: Build kernel
+        run: |
+          export ARCH=${ARCH}
+          export KBUILD_OUTPUT=${KBUILD_OUTPUT}
+          export CROSS_COMPILE=${CROSS_COMPILE}
+
+          make O=${KBUILD_OUTPUT} ${DEFCONFIG}
+          make -j$(nproc) O=${KBUILD_OUTPUT}
+
+          KIMG=""
+          for f in \
+            ${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image.gz-dtb \
+            ${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image \
+            ${KBUILD_OUTPUT}/arch/${ARCH}/boot/zImage \
+            ${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image.gz; do
+            if [ -f "$f" ]; then
+              KIMG="$f"
+              break
+            fi
+          done
+
+          if [ -z "$KIMG" ]; then
+            echo "Kernel image not found!"
+            exit 1
+          fi
+
+          echo "$KIMG" > kernel_image.path
+
+      - name: Prepare ramdisk
+        run: |
+          RAM=${RAMDISK_PATH}
+
+          if [ -d "$RAM" ]; then
+            echo "Packing ramdisk directory..."
+            pushd "$RAM"
+            find . | cpio -H newc -o | gzip > ../ramdisk.img
+            popd
+
+          elif [ -f "$RAM" ]; then
+            echo "Using provided ramdisk file"
+            cp "$RAM" ramdisk.img
+
+          else
+            echo "Ramdisk not found! Creating fallback..."
+            mkdir -p initramfs
+            echo -e '#!/bin/sh\nexec /bin/sh' > initramfs/init
+            chmod +x initramfs/init
+            pushd initramfs
+            find . | cpio -H newc -o | gzip > ../ramdisk.img
+            popd
+          fi
+
+      - name: Create boot.img (mkbootimg)
+        run: |
+          if command -v mkbootimg >/dev/null 2>&1; then
+            echo "Using mkbootimg"
+            KIMG=$(cat kernel_image.path)
+            mkbootimg --kernel "$KIMG" \
+                      --ramdisk ramdisk.img \
+                      --cmdline "${CMDLINE}" \
+                      --base "${BASE}" \
+                      --pagesize "${PAGESIZE}" \
+                      -o boot.img
+          else
+            echo "mkbootimg missing, will use abootimg fallback"
+          fi
+
+      - name: Fallback: abootimg
+        run: |
+          if [ -f boot.img ]; then
+            exit 0
+          fi
+
+          echo "Using abootimg"
+          KIMG=$(cat kernel_image.path)
+
+          cat > bootimg.cfg <<EOF
+cmdline=${CMDLINE}
+base=${BASE}
+pagesize=${PAGESIZE}
+EOF
+
+          abootimg --create boot.img -k "$KIMG" -r ramdisk.img -f bootimg.cfg
+
+      - name: Upload boot.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot.img
+          path: boot.img

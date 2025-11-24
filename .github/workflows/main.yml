@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Kernel + Module + AnyKernel3
 
 on:
   push:
@@ -16,22 +16,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ----------------------------
+      # 1. Checkout Kernel Source
+      # ----------------------------
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install required packages
+      # ----------------------------
+      # 2. Install Required Packages
+      # ----------------------------
+      - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y \
             bc bison flex build-essential git ccache curl wget unzip \
             libssl-dev python3 python-is-python3 \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      # ---------------------------------------------------------
-      # GUARANTEED-WORKING AOSP LLVM TOOLCHAIN
-      # ---------------------------------------------------------
-
+      # ----------------------------
+      # 3. Download AOSP LLVM Toolchain
+      # ----------------------------
       - name: Download AOSP Clang
         run: |
           mkdir -p clang
@@ -40,10 +44,9 @@ jobs:
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH
 
-      # ---------------------------------------------------------
-      # EXPORT TOOLCHAIN VARIABLES
-      # ---------------------------------------------------------
-
+      # ----------------------------
+      # 4. Export Toolchain Variables
+      # ----------------------------
       - name: Export toolchain variables
         run: |
           echo "CC=$CLANG_PATH/bin/clang" >> $GITHUB_ENV
@@ -51,61 +54,116 @@ jobs:
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      # ---------------------------------------------------------
-      # BUILD DEFCONFIG
-      # ---------------------------------------------------------
-
+      # ----------------------------
+      # 5. Build Kernel Defconfig
+      # ----------------------------
       - name: Make defconfig
         run: |
           make O=${KBUILD_OUTPUT} $DEFCONFIG
 
-      # ---------------------------------------------------------
-      # BUILD KERNEL
-      # ---------------------------------------------------------
-
-      - name: Build Kernel Image (Image.gz-dtb)
+      # ----------------------------
+      # 6. Build Kernel
+      # ----------------------------
+      - name: Build Kernel Image
         run: |
-          make -j$(nproc) \
-            O=${KBUILD_OUTPUT} \
-            ARCH=arm64 \
-            CC="$CLANG_PATH/bin/clang"
+          make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64 CC="$CLANG_PATH/bin/clang"
 
-      # ---------------------------------------------------------
-      # BUILD DTBO
-      # ---------------------------------------------------------
-
-      - name: Build DTBO image
+      # ----------------------------
+      # 7. Build DTBO (optional)
+      # ----------------------------
+      - name: Build DTBO
         run: |
-          make -j$(nproc) \
-            O=${KBUILD_OUTPUT} \
-            ARCH=arm64 \
-            dtboimg || true
+          make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64 dtboimg || true
 
-      # ---------------------------------------------------------
-      # ANYKERNEL PACKAGING
-      # ---------------------------------------------------------
+      # ----------------------------
+      # 8. Build Custom Kernel Module
+      # ----------------------------
+      - name: Build Custom Kernel Module
+        run: |
+          mkdir -p kernel/my_module
+          # Example module file (replace with your actual module source)
+          cat > kernel/my_module/my_module.c << 'EOF'
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/proc_fs.h>
 
+static struct proc_dir_entry *entry;
+
+static ssize_t my_read(struct file *filp, char __user *buf, size_t count, loff_t *off)
+{
+    const char msg[] = "Hello from kernel module\n";
+    return simple_read_from_buffer(buf, count, off, msg, sizeof(msg)-1);
+}
+
+static const struct proc_ops fops = {
+    .proc_read = my_read,
+};
+
+static int __init my_init(void)
+{
+    entry = proc_create("my_module", 0444, NULL, &fops);
+    printk(KERN_INFO "my_module loaded\n");
+    return 0;
+}
+
+static void __exit my_exit(void)
+{
+    proc_remove(entry);
+    printk(KERN_INFO "my_module unloaded\n");
+}
+
+module_init(my_init);
+module_exit(my_exit);
+MODULE_LICENSE("GPL");
+EOF
+
+          # Makefile for the module
+          cat > kernel/my_module/Makefile << 'EOF'
+obj-m := my_module.o
+KDIR := $(PWD)/../../
+PWD := $(shell pwd)
+
+all:
+	$(MAKE) -C $(KDIR) O=$(KDIR)/out M=$(PWD) modules
+
+clean:
+	$(MAKE) -C $(KDIR) O=$(KDIR)/out M=$(PWD) clean
+EOF
+
+          # Build the module
+          cd kernel/my_module
+          make -j$(nproc)
+          cp my_module.ko $GITHUB_WORKSPACE/out/
+
+      # ----------------------------
+      # 9. Clone AnyKernel3
+      # ----------------------------
       - name: Clone AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
 
-      - name: Copy kernel output to AnyKernel3
+      # ----------------------------
+      # 10. Copy Kernel & Module to AnyKernel3
+      # ----------------------------
+      - name: Copy Kernel and Module
         run: |
           cp out/arch/arm64/boot/Image.gz-dtb AnyKernel/ || true
           cp out/arch/arm64/boot/Image.gz AnyKernel/ || true
           cp out/arch/arm64/boot/Image AnyKernel/ || true
           cp out/arch/arm64/boot/dtbo.img AnyKernel/ || true
-          rm -f AnyKernel/patch AnyKernel/modules || true
+          cp out/my_module.ko AnyKernel/modules/ || true
 
-      - name: Create flashable ZIP
+      # ----------------------------
+      # 11. Create Flashable ZIP
+      # ----------------------------
+      - name: Create AnyKernel3 ZIP
         run: |
           cd AnyKernel
           zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
 
-      # ---------------------------------------------------------
-      # UPLOAD ARTIFACTS
-      # ---------------------------------------------------------
-
+      # ----------------------------
+      # 12. Upload Artifacts
+      # ----------------------------
       - name: Upload Kernel Files
         uses: actions/upload-artifact@v4
         with:
@@ -115,6 +173,7 @@ jobs:
             out/arch/arm64/boot/Image.gz
             out/arch/arm64/boot/Image.gz-dtb
             out/arch/arm64/boot/dtbo.img
+            out/my_module.ko
           if-no-files-found: warn
 
       - name: Upload AnyKernel3 ZIP

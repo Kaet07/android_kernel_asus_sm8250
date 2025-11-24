@@ -1,60 +1,107 @@
-name: Build Kernel
+name: Kernel Build
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   workflow_dispatch:
-
-env:
-  ARCH: arm64
-  SUBARCH: arm64
-  KBUILD_OUTPUT: out
-  DEFCONFIG: obiwan_defconfig
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+    - name: Checkout source
+      uses: actions/checkout@v4
 
-      - name: Install required packages
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            bc bison flex build-essential git ccache curl \
-            libssl-dev python3 python-is-python3 \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y bc bison flex build-essential curl wget git unzip python3 \
+          libssl-dev rsync ccache libelf-dev libc6-dev libncurses-dev
 
-      - name: Download Proton Clang
-        run: |
-          mkdir -p clang
-          wget https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
-          unzip clang.zip -d clang
-          mv clang/proton-clang-master/* clang/
-          echo "CLANG_PATH=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
+    - name: Setup Clang
+      run: |
+        mkdir -p clang
+        cd clang
+        wget https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.1/clang+llvm-17.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+        tar -xf clang+llvm-17.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+        mv clang+llvm-17.0.1-x86_64-linux-gnu-ubuntu-22.04 clang-17
+        cd ..
 
-      - name: Export toolchain variables
-        run: |
-          echo "CC=${CLANG_PATH}/clang" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
-          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo "CLANG_PATH=$(pwd)/clang/clang-17" >> $GITHUB_ENV
 
-      - name: Make defconfig
-        run: |
-          make O=${KBUILD_OUTPUT} $DEFCONFIG
+    - name: Configure kernel
+      run: |
+        export PATH=$CLANG_PATH/bin:$PATH
+        make O=out ARCH=arm64 obiwan_defconfig
 
-      - name: Build Kernel (Clang + GCC)
-        run: |
-          make -j$(nproc) O=${KBUILD_OUTPUT} \
-            CC="${CLANG_PATH}/clang" \
-            ARCH=arm64
+    - name: Build kernel
+      run: |
+        export PATH=$CLANG_PATH/bin:$PATH
+        export LD=ld.lld
+        export CC=clang
+        export AR=llvm-ar
+        export NM=llvm-nm
+        export OBJCOPY=llvm-objcopy
+        export OBJDUMP=llvm-objdump
+        export STRIP=llvm-strip
 
-      - name: Upload Image.gz-dtb
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image.gz-dtb
-          path: out/arch/arm64/boot/Image.gz-dtb
+        make -j$(nproc) O=out ARCH=arm64
+
+    - name: Build dtbo
+      run: |
+        export PATH=$CLANG_PATH/bin:$PATH
+        make -j$(nproc) O=out ARCH=arm64 dtboimg || true
+
+    # --- ANYKERNEL3 PACKING ---
+    - name: Clone AnyKernel3
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
+
+    - name: Copy kernel files into AnyKernel3
+      run: |
+        cp out/arch/arm64/boot/Image.gz AnyKernel/
+        cp out/arch/arm64/boot/Image.gz-dtb AnyKernel/ || true
+        cp out/arch/arm64/boot/dtbo.img AnyKernel/ || true
+
+        # Remove unused placeholders
+        rm -f AnyKernel/modules AnyKernel/patch || true
+
+    - name: Create AnyKernel flashable zip
+      run: |
+        cd AnyKernel
+        zip -r9 ../kernel-${GITHUB_SHA}-AnyKernel.zip ./*
+
+    # --- BOOT.IMG BUILD (using mkbootimg from AOSP) ---
+    - name: Download AOSP mkbootimg
+      run: |
+        wget https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/master/mkbootimg.py?format=TEXT -O mkbootimg.b64
+        base64 -d mkbootimg.b64 > mkbootimg
+        chmod +x mkbootimg
+
+    - name: Create boot.img
+      run: |
+        # Change paths if needed
+        ./mkbootimg \
+          --kernel out/arch/arm64/boot/Image.gz \
+          --ramdisk ramdisk.img \
+          --dtb out/arch/arm64/boot/dtb.img \
+          --pagesize 4096 \
+          --base 0x00000000 \
+          --kernel_offset 0x00008000 \
+          --ramdisk_offset 0x01000000 \
+          --tags_offset 0x00000100 \
+          --output boot.img || true
+
+    # --- UPLOAD ARTIFACTS ---
+    - name: Upload AnyKernel zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: Flashable-AnyKernel3
+        path: kernel-*-AnyKernel.zip
+
+    - name: Upload boot.img
+      uses: actions/upload-artifact@v4
+      with:
+        name: Boot-Image
+        path: boot.img

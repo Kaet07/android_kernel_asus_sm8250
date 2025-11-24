@@ -2,7 +2,7 @@ name: Build Kernel + AnyKernel (with modules)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
@@ -34,13 +34,14 @@ jobs:
           mkdir -p clang
           wget https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
           unzip -q clang.zip -d clang
-          mv clang/proton-clang-master/* clang/
+          mv clang/proton-clang-master/* clang/ || true
+          # Export CLANG_PATH into GITHUB_ENV with an absolute path
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
           echo "PATH=$PWD/clang/bin:$PATH" >> $GITHUB_ENV
 
       - name: Export toolchain variables
         run: |
-          # Ensure CLANG_PATH is available for later steps
+          # append common toolchain envs
           echo "CC=${CLANG_PATH}/bin/clang" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
@@ -48,13 +49,13 @@ jobs:
 
       - name: Configure kernel (obiwan_defconfig)
         run: |
-          export PATH="${CLANG_PATH}/bin:$PATH"
+          export PATH="$CLANG_PATH/bin:$PATH"
           make O=${KBUILD_OUTPUT} ARCH=arm64 ${DEFCONFIG}
 
       - name: Build kernel and modules
         run: |
-          export PATH="${CLANG_PATH}/bin:$PATH"
-          export CC="${CLANG_PATH}/bin/clang"
+          export PATH="$CLANG_PATH/bin:$PATH"
+          export CC="$CLANG_PATH/bin/clang"
           export LD=ld.lld
           export AR=llvm-ar
           export NM=llvm-nm
@@ -62,44 +63,37 @@ jobs:
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
 
-          # Build kernel and modules
           make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64
 
       - name: Install modules into temporary tree
         run: |
-          # Install modules into a temporary directory so we can copy the exact .ko files
           rm -rf mod_tmp
           mkdir -p mod_tmp
-          # modules_install will put modules into mod_tmp/lib/modules/$(kernelrelease)/
           make -j1 O=${KBUILD_OUTPUT} ARCH=arm64 INSTALL_MOD_PATH=$PWD/mod_tmp modules_install
-
-          # Print what was installed (for debugging)
-          echo "Installed modules tree:"
-          ls -R mod_tmp || true
+          echo "Installed modules (summary):"
+          find mod_tmp -maxdepth 4 -type f -name "*.ko" -print || true
 
       - name: Determine kernel release (KVER)
         id: kernelver
         run: |
           KVER=$(make -s O=${KBUILD_OUTPUT} kernelrelease)
-          echo "KVER=${KVER}" >> $GITHUB_OUTPUT
-          echo "Kernel release: ${KVER}"
+          echo "KVER=${KVER}"
+          # write to GITHUB_OUTPUT (supported method)
+          echo "KVER=${KVER}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare AnyKernel3 directory
         run: |
           rm -rf AnyKernel
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
-
-          # Create modules folder expected by AnyKernel and copy kernel modules into it
-          mkdir -p AnyKernel/modules/${{ steps.kernelver.outputs.KVER }}
+          mkdir -p "AnyKernel/modules/${{ steps.kernelver.outputs.KVER }}"
           if [ -d "mod_tmp/lib/modules/${{ steps.kernelver.outputs.KVER }}" ]; then
-            cp -v mod_tmp/lib/modules/${{ steps.kernelver.outputs.KVER }}/*.ko AnyKernel/modules/${{ steps.kernelver.outputs.KVER }}/ || true
+            cp -v mod_tmp/lib/modules/${{ steps.kernelver.outputs.KVER }}/*.ko "AnyKernel/modules/${{ steps.kernelver.outputs.KVER }}/" || true
           else
-            echo "No modules found for kernel ${ { steps.kernelver.outputs.KVER } } (proceeding)."
+            echo "No modules installed for kernel ${ { steps.kernelver.outputs.KVER } } (continuing)"
           fi
 
       - name: Place kernel images in AnyKernel
         run: |
-          # Copy available kernel outputs into AnyKernel (some kernels produce Image, Image.gz, Image.gz-dtb)
           cp -v out/arch/arm64/boot/Image.gz-dtb AnyKernel/ 2>/dev/null || true
           cp -v out/arch/arm64/boot/Image.gz AnyKernel/ 2>/dev/null || true
           cp -v out/arch/arm64/boot/Image AnyKernel/ 2>/dev/null || true
@@ -134,10 +128,10 @@ supported.patchlevels=
 supported.vendorpatchlevels=
 CFG
 
-      - name: Ensure AnyKernel will install modules (sanity)
+      - name: Ensure AnyKernel modules presence
         run: |
-          echo "Listing AnyKernel/modules tree:"
-          find AnyKernel/modules -maxdepth 3 -type f -name "*.ko" -print || echo "No .ko files present (that's ok if none built)."
+          echo "AnyKernel modules tree:"
+          find AnyKernel/modules -type f -name "*.ko" -print || echo "No .ko files present (that's okay if none built)."
 
       - name: Create flashable AnyKernel zip
         run: |
@@ -151,7 +145,7 @@ CFG
           path: AnyKernel-*.zip
           if-no-files-found: error
 
-      - name: Upload kernel artifacts (images and modules tar)
+      - name: Upload kernel artifacts (images and modules)
         uses: actions/upload-artifact@v4
         with:
           name: Kernel-Artifacts

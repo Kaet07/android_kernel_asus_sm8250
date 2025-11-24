@@ -16,16 +16,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ----------------------------
-      # 1. Checkout Kernel Source
-      # ----------------------------
+      # 1. Checkout source
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # ----------------------------
-      # 2. Install Required Packages
-      # ----------------------------
-      - name: Install dependencies
+      # 2. Install dependencies
+      - name: Install required packages
         run: |
           sudo apt update
           sudo apt install -y \
@@ -33,20 +29,17 @@ jobs:
             libssl-dev python3 python-is-python3 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      # ----------------------------
-      # 3. Download AOSP LLVM Toolchain
-      # ----------------------------
-      - name: Download AOSP Clang
+      # 3. Download Proton Clang
+      - name: Download Proton Clang
         run: |
           mkdir -p clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r530567.tar.gz -O clang.tar.gz
-          tar -xzf clang.tar.gz -C clang
+          wget -q https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
+          unzip clang.zip -d clang
+          mv clang/proton-clang-master/* clang/
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH
 
-      # ----------------------------
-      # 4. Export Toolchain Variables
-      # ----------------------------
+      # 4. Export toolchain variables
       - name: Export toolchain variables
         run: |
           echo "CC=$CLANG_PATH/bin/clang" >> $GITHUB_ENV
@@ -54,34 +47,26 @@ jobs:
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      # ----------------------------
-      # 5. Build Kernel Defconfig
-      # ----------------------------
+      # 5. Make defconfig
       - name: Make defconfig
         run: |
           make O=${KBUILD_OUTPUT} $DEFCONFIG
 
-      # ----------------------------
-      # 6. Build Kernel
-      # ----------------------------
+      # 6. Build kernel
       - name: Build Kernel Image
         run: |
           make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64 CC="$CLANG_PATH/bin/clang"
 
-      # ----------------------------
-      # 7. Build DTBO (optional)
-      # ----------------------------
+      # 7. Build DTBO
       - name: Build DTBO
         run: |
           make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64 dtboimg || true
 
-      # ----------------------------
-      # 8. Build Custom Kernel Module
-      # ----------------------------
+      # 8. Build custom kernel module
       - name: Build Custom Kernel Module
         run: |
           mkdir -p kernel/my_module
-          # Example module file (replace with your actual module source)
+          # Add example module source
           cat > kernel/my_module/my_module.c << 'EOF'
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -89,8 +74,7 @@ jobs:
 
 static struct proc_dir_entry *entry;
 
-static ssize_t my_read(struct file *filp, char __user *buf, size_t count, loff_t *off)
-{
+static ssize_t my_read(struct file *filp, char __user *buf, size_t count, loff_t *off) {
     const char msg[] = "Hello from kernel module\n";
     return simple_read_from_buffer(buf, count, off, msg, sizeof(msg)-1);
 }
@@ -99,15 +83,13 @@ static const struct proc_ops fops = {
     .proc_read = my_read,
 };
 
-static int __init my_init(void)
-{
+static int __init my_init(void) {
     entry = proc_create("my_module", 0444, NULL, &fops);
     printk(KERN_INFO "my_module loaded\n");
     return 0;
 }
 
-static void __exit my_exit(void)
-{
+static void __exit my_exit(void) {
     proc_remove(entry);
     printk(KERN_INFO "my_module unloaded\n");
 }
@@ -117,7 +99,6 @@ module_exit(my_exit);
 MODULE_LICENSE("GPL");
 EOF
 
-          # Makefile for the module
           cat > kernel/my_module/Makefile << 'EOF'
 obj-m := my_module.o
 KDIR := $(PWD)/../../
@@ -130,22 +111,17 @@ clean:
 	$(MAKE) -C $(KDIR) O=$(KDIR)/out M=$(PWD) clean
 EOF
 
-          # Build the module
           cd kernel/my_module
           make -j$(nproc)
           cp my_module.ko $GITHUB_WORKSPACE/out/
 
-      # ----------------------------
       # 9. Clone AnyKernel3
-      # ----------------------------
       - name: Clone AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
 
-      # ----------------------------
-      # 10. Copy Kernel & Module to AnyKernel3
-      # ----------------------------
-      - name: Copy Kernel and Module
+      # 10. Copy kernel and module to AnyKernel3
+      - name: Copy kernel and module
         run: |
           cp out/arch/arm64/boot/Image.gz-dtb AnyKernel/ || true
           cp out/arch/arm64/boot/Image.gz AnyKernel/ || true
@@ -153,17 +129,13 @@ EOF
           cp out/arch/arm64/boot/dtbo.img AnyKernel/ || true
           cp out/my_module.ko AnyKernel/modules/ || true
 
-      # ----------------------------
-      # 11. Create Flashable ZIP
-      # ----------------------------
+      # 11. Create flashable ZIP
       - name: Create AnyKernel3 ZIP
         run: |
           cd AnyKernel
           zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
 
-      # ----------------------------
-      # 12. Upload Artifacts
-      # ----------------------------
+      # 12. Upload artifacts
       - name: Upload Kernel Files
         uses: actions/upload-artifact@v4
         with:

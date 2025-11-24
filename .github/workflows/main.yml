@@ -19,11 +19,14 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install required packages
         run: |
           sudo apt update
-          sudo apt install -y bc bison flex build-essential git ccache curl \
-            libssl-dev python3 python-is-python3
+          sudo apt install -y \
+            bc bison flex build-essential git ccache curl \
+            libssl-dev python3 python-is-python3 \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi
 
       - name: Download Proton Clang
         run: |
@@ -44,30 +47,14 @@ jobs:
         run: |
           make O=${KBUILD_OUTPUT} $DEFCONFIG
 
-      - name: Build Kernel with Clang
+      - name: Build Kernel (Clang + GCC)
         run: |
           make -j$(nproc) O=${KBUILD_OUTPUT} \
             CC="${CLANG_PATH}/clang" \
             ARCH=arm64
 
-      - name: Install AOSP mkbootimg
-        run: |
-          git clone https://android.googlesource.com/platform/system/tools/mkbootimg --depth=1
-          sudo install -m 0755 mkbootimg/mkbootimg.py /usr/local/bin/mkbootimg
-
-      - name: Build boot.img
-        run: |
-          mkdir -p out_img
-          mkbootimg \
-            --kernel ${KBUILD_OUTPUT}/arch/arm64/boot/Image.gz-dtb \
-            --ramdisk ramdisk.img \
-            --cmdline "console=tty0" \
-            --base 0x10000000 \
-            --pagesize 2048 \
-            --output out_img/boot.img
-
-      - name: Upload boot.img
+      - name: Upload Image.gz-dtb
         uses: actions/upload-artifact@v4
         with:
-          name: boot-img
-          path: out_img/boot.img
+          name: Image.gz-dtb
+          path: out/arch/arm64/boot/Image.gz-dtb

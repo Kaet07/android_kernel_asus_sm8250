@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Kernel + Safe AnyKernel (modules, split flash)
 
 on:
   push:
@@ -7,13 +7,13 @@ on:
 
 env:
   ARCH: arm64
-  SUBARCH: arm64
-  DEFCONFIG: obiwan_defconfig
   KBUILD_OUTPUT: out
+  DEFCONFIG: obiwan_defconfig
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
       - name: Checkout source
@@ -22,64 +22,162 @@ jobs:
       - name: Install required packages
         run: |
           sudo apt update
-          sudo apt install -y bc bison flex build-essential git curl wget unzip \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libc6-dev libssl-dev
+          sudo apt install -y bc bison flex build-essential git ccache curl wget unzip \
+            libssl-dev python3 python-is-python3 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            libncurses-dev rsync zip
 
-      - name: Download & extract Proton Clang
+      - name: Download Proton Clang (stable)
         run: |
-          mkdir clang
-          wget https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
-          unzip clang.zip -d clang
+          mkdir -p clang
+          wget -q https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
+          unzip -q clang.zip -d clang
           mv clang/proton-clang-master/* clang/
+          echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
+          echo "PATH=$PWD/clang/bin:$PATH" >> $GITHUB_ENV
 
-      - name: Export toolchain paths
+      - name: Configure kernel (obiwan_defconfig)
         run: |
-          echo "CLANG_PATH=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
-          echo "CC=$GITHUB_WORKSPACE/clang/bin/clang" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
-          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          export PATH="$CLANG_PATH/bin:$PATH"
+          make O=${KBUILD_OUTPUT} ARCH=arm64 ${DEFCONFIG}
 
-      - name: Configure defconfig
+      - name: Build kernel and modules
         run: |
-          make O=${KBUILD_OUTPUT} $DEFCONFIG
+          export PATH="$CLANG_PATH/bin:$PATH"
+          export CC="$CLANG_PATH/bin/clang"
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
 
-      - name: Build kernel + modules
-        run: |
-          make -j$(nproc) O=${KBUILD_OUTPUT} \
-            CC="${CLANG_PATH}/clang" \
-            ARCH=arm64
+          make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64
 
-      - name: Install kernel modules
+      - name: Install modules into temp tree
         run: |
-          mkdir -p out/modules
-          make O=${KBUILD_OUTPUT} modules_install INSTALL_MOD_PATH=out/modules
+          rm -rf mod_tmp
+          mkdir -p mod_tmp
+          make -j1 O=${KBUILD_OUTPUT} ARCH=arm64 INSTALL_MOD_PATH=$PWD/mod_tmp modules_install
+          # Sanity list
+          echo "Installed modules for kernel:"
+          find mod_tmp -type f -name '*.ko' -print || true
+
+      - name: Get kernel release name
+        id: kernelver
+        run: |
+          KVER=$(make -s O=${KBUILD_OUTPUT} kernelrelease)
+          echo "KVER=${KVER}" >> "$GITHUB_OUTPUT"
+          echo "KVER=${KVER}"
 
       - name: Clone AnyKernel3
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git ak3
-          rm -rf ak3/.git
-          rm -rf ak3/modules
-          mkdir -p ak3/modules/vendor/lib/modules
-          cp -r out/modules/lib/modules/* ak3/modules/vendor/lib/modules/
+          rm -rf AnyKernel
+          git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
+          # ensure the repo is clean (remove .git to keep zip small)
+          rm -rf AnyKernel/.git
 
-      - name: Copy kernel image into AnyKernel3
+      - name: Patch AnyKernel3 to use split/flash (avoid ramdisk repack)
         run: |
-          cp out/arch/arm64/boot/Image.gz-dtb ak3/
+          # We'll create a small custom anykernel.sh wrapper that sets split_boot/flash_boot behavior.
+          # Backup original anykernel.sh
+          cp AnyKernel/anykernel.sh AnyKernel/anykernel.sh.orig || true
 
-      - name: Fix AnyKernel3 properties
+          # Overwrite anykernel.sh with a minimal wrapper that sources ak3-core.sh and uses split_boot/flash_boot.
+          cat > AnyKernel/anykernel.sh <<'AKSH'
+#!/sbin/sh
+## AnyKernel3 wrapper for safe split flashing (do not repack ramdisk)
+properties() { '
+kernel.string=KaetoKernel (obiwan) by Kaeto
+do.devicecheck=1
+do.modules=1
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+'; } # end properties
+
+# set boot/vb/dtbo targets
+# Use by-name base and slot-aware operation for A/B devices
+BLOCK=/dev/block/by-name/boot
+IS_SLOT_DEVICE=1
+
+# We will use split_boot/flash_boot which flashes kernel components without unpacking/repacking ramdisk
+# (this avoids modifying vendor ramdisk which preserves audio and vendor services)
+# import AK3 core (original file should be present)
+. tools/ak3-core.sh
+
+# Use split_boot to flash kernel/dtb only (skip ramdisk unpack)
+split_boot
+flash_boot
+
+# install modules from modules/ into vendor or system as AK3 does
+install_modules
+AKSH
+          chmod +x AnyKernel/anykernel.sh
+
+      - name: Copy kernel images & dtbo into AnyKernel
         run: |
-          sed -i 's/do.devicecheck=.*/do.devicecheck=0/' ak3/anykernel.sh
-          sed -i 's|BLOCK=.*|IS_SLOT_DEVICE=1|' ak3/anykernel.sh
-          sed -i 's|BLOCK=.*|# Auto-slot device|' ak3/anykernel.sh
+          # copy whichever outputs exist (Image, Image.gz, Image.gz-dtb)
+          cp -v out/arch/arm64/boot/Image.gz-dtb AnyKernel/ 2>/dev/null || true
+          cp -v out/arch/arm64/boot/Image.gz AnyKernel/ 2>/dev/null || true
+          cp -v out/arch/arm64/boot/Image AnyKernel/ 2>/dev/null || true
+          # copy dtbo if present
+          cp -v out/arch/arm64/boot/dtbo.img AnyKernel/ 2>/dev/null || true
+          # copy kernel cmdline if you want (optional)
+          # cp -v out/cmdline AnyKernel/ 2>/dev/null || true
 
-      - name: Create flashable AnyKernel zip
+      - name: Copy built modules into AnyKernel/modules/<kver>
         run: |
-          cd ak3
-          zip -r9 ../AnyKernel3-Kernel.zip .
+          KVER=${{ steps.kernelver.outputs.KVER }}
+          mkdir -p "AnyKernel/modules/${KVER}"
+          # If modules_installed, copy them; otherwise continue
+          if [ -d "mod_tmp/lib/modules/${KVER}" ]; then
+            cp -v mod_tmp/lib/modules/${KVER}/*.ko "AnyKernel/modules/${KVER}/" || true
+          fi
+          echo "AnyKernel modules tree now:"
+          find AnyKernel/modules -type f -name '*.ko' -print || true
 
-      - name: Upload flashable kernel zip
+      - name: Create safe AnyKernel config.txt (A/B + modules enabled)
+        run: |
+          cat > AnyKernel/config.txt <<'CFG'
+kernel.string=KaetoKernel (obiwan) by Kaeto
+do.devicecheck=1
+do.modules=1
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+is_slot_device=1
+block=/dev/block/by-name/boot
+device.name1=obiwan
+device.name2=ZS661KS
+device.name3=ZS661KL
+device.name4=ASUS_I003_1
+device.name5=I003D
+device.name6=I003DD
+supported.versions=
+supported.patchlevels=
+supported.vendorpatchlevels=
+CFG
+
+      - name: Create flashable AnyKernel zip (safe split flash)
+        run: |
+          cd AnyKernel
+          zip -r9 ../AnyKernel-safe-${GITHUB_SHA}.zip ./*
+
+      - name: Upload AnyKernel SAFE zip
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3-Kernel
-          path: AnyKernel3-Kernel.zip
+          name: AnyKernel-safe-zip
+          path: AnyKernel-safe-*.zip
+          if-no-files-found: error
+
+      - name: Upload kernel artifacts (+module tar)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-artifacts
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/Image.gz-dtb
+            out/arch/arm64/boot/dtbo.img
+            mod_tmp/lib/modules/${{ steps.kernelver.outputs.KVER }}/*.ko
+          if-no-files-found: warn

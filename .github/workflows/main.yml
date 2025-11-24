@@ -19,11 +19,18 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt update
           sudo apt install -y bc bison flex build-essential gcc-aarch64-linux-gnu \
-            libssl-dev git ccache curl python3 python-is-python3 mkbootimg-utils
+            libssl-dev git ccache curl python3 python-is-python3
+
+      - name: Install AOSP mkbootimg
+        run: |
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg --depth=1
+          sudo install -m 0755 mkbootimg/mkbootimg.py /usr/local/bin/mkbootimg
+          sudo install -m 0755 mkbootimg/unpack_bootimg.py /usr/local/bin/unpack_bootimg
+          sudo ln -sf /usr/bin/python3 /usr/bin/python
 
       - name: Setup AArch64 toolchain
         run: |

@@ -11,7 +11,6 @@ permissions:
 env:
   ARCH: arm64
   KBUILD_OUTPUT: out
-  JOBS: ${{ runner.cores }}
   CROSS_COMPILE: aarch64-linux-gnu-
   DEFCONFIG: obiwan_defconfig
   RAMDISK_PATH: ramdisk
@@ -39,92 +38,119 @@ jobs:
 
       - name: Prepare environment
         run: |
-          mkdir -p ${KBUILD_OUTPUT}
+          mkdir -p "${KBUILD_OUTPUT}"
           echo "Using defconfig: ${DEFCONFIG}"
 
       - name: Build kernel
+        shell: bash
         run: |
-          export ARCH=${ARCH}
-          export KBUILD_OUTPUT=${KBUILD_OUTPUT}
-          export CROSS_COMPILE=${CROSS_COMPILE}
+          set -euo pipefail
+          export ARCH="${ARCH}"
+          export KBUILD_OUTPUT="${KBUILD_OUTPUT}"
+          export CROSS_COMPILE="${CROSS_COMPILE}"
 
-          make O=${KBUILD_OUTPUT} ${DEFCONFIG}
-          make -j$(nproc) O=${KBUILD_OUTPUT}
+          # configure and build
+          make O="${KBUILD_OUTPUT}" "${DEFCONFIG}"
+          make -j"$(nproc)" O="${KBUILD_OUTPUT}"
+
+          # find kernel image
+          candidates=(
+            "${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image.gz-dtb"
+            "${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image"
+            "${KBUILD_OUTPUT}/arch/${ARCH}/boot/zImage"
+            "${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image.gz"
+          )
 
           KIMG=""
-          for f in \
-            ${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image.gz-dtb \
-            ${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image \
-            ${KBUILD_OUTPUT}/arch/${ARCH}/boot/zImage \
-            ${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image.gz; do
+          for f in "${candidates[@]}"; do
             if [ -f "$f" ]; then
               KIMG="$f"
               break
             fi
           done
 
-          if [ -z "$KIMG" ]; then
-            echo "Kernel image not found!"
+          if [ -z "${KIMG}" ]; then
+            echo "Kernel image not found under ${KBUILD_OUTPUT}/arch/${ARCH}/boot"
+            ls -la "${KBUILD_OUTPUT}/arch/${ARCH}/boot" || true
             exit 1
           fi
 
-          echo "$KIMG" > kernel_image.path
+          echo "${KIMG}" > kernel_image.path
+          echo "Found kernel image: ${KIMG}"
 
       - name: Prepare ramdisk
+        shell: bash
         run: |
-          RAM=${RAMDISK_PATH}
+          set -euo pipefail
+          RAM="${RAMDISK_PATH}"
 
-          if [ -d "$RAM" ]; then
+          if [ -d "${RAM}" ]; then
             echo "Packing ramdisk directory..."
-            pushd "$RAM"
-            find . | cpio -H newc -o | gzip > ../ramdisk.img
-            popd
+            pushd "${RAM}" >/dev/null
+            find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../ramdisk.img
+            popd >/dev/null
 
-          elif [ -f "$RAM" ]; then
+          elif [ -f "${RAM}" ]; then
             echo "Using provided ramdisk file"
-            cp "$RAM" ramdisk.img
+            cp "${RAM}" ramdisk.img
 
           else
-            echo "Ramdisk not found! Creating fallback..."
+            echo "Ramdisk not found! Creating tiny fallback..."
             mkdir -p initramfs
-            echo -e '#!/bin/sh\nexec /bin/sh' > initramfs/init
+            cat > initramfs/init <<'SH'
+#!/bin/sh
+exec /bin/sh
+SH
             chmod +x initramfs/init
-            pushd initramfs
-            find . | cpio -H newc -o | gzip > ../ramdisk.img
-            popd
+            pushd initramfs >/dev/null
+            find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../ramdisk.img
+            popd >/dev/null
           fi
 
-      - name: Create boot.img (mkbootimg)
+          ls -lh ramdisk.img || true
+
+      - name: Create boot.img (mkbootimg if available)
+        shell: bash
         run: |
+          set -euo pipefail
           if command -v mkbootimg >/dev/null 2>&1; then
-            echo "Using mkbootimg"
-            KIMG=$(cat kernel_image.path)
-            mkbootimg --kernel "$KIMG" \
+            echo "mkbootimg found; using it"
+            KIMG="$(cat kernel_image.path)"
+            mkbootimg --kernel "${KIMG}" \
                       --ramdisk ramdisk.img \
                       --cmdline "${CMDLINE}" \
                       --base "${BASE}" \
                       --pagesize "${PAGESIZE}" \
                       -o boot.img
+            echo "boot.img created by mkbootimg"
           else
-            echo "mkbootimg missing, will use abootimg fallback"
+            echo "mkbootimg not found; deferring to abootimg fallback step"
           fi
 
-      - name: Fallback: abootimg
+      - name: Fallback: create boot.img with abootimg if needed
+        shell: bash
         run: |
+          set -euo pipefail
           if [ -f boot.img ]; then
+            echo "boot.img already exists; skipping abootimg"
             exit 0
           fi
 
-          echo "Using abootimg"
-          KIMG=$(cat kernel_image.path)
+          if ! command -v abootimg >/dev/null 2>&1; then
+            echo "Error: abootimg is not installed. Install abootimg or mkbootimg in the runner."
+            exit 1
+          fi
 
-          cat > bootimg.cfg <<EOF
+          echo "Creating boot.img using abootimg"
+          KIMG="$(cat kernel_image.path)"
+          cat > bootimg.cfg <<CFG
 cmdline=${CMDLINE}
 base=${BASE}
 pagesize=${PAGESIZE}
-EOF
+CFG
 
-          abootimg --create boot.img -k "$KIMG" -r ramdisk.img -f bootimg.cfg
+          abootimg --create boot.img -k "${KIMG}" -r ramdisk.img -f bootimg.cfg
+          echo "boot.img created by abootimg"
 
       - name: Upload boot.img
         uses: actions/upload-artifact@v4

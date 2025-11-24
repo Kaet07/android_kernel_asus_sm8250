@@ -2,7 +2,7 @@ name: Build Kernel + Safe AnyKernel (modules, split flash)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
@@ -22,16 +22,17 @@ jobs:
       - name: Install required packages
         run: |
           sudo apt update
-          sudo apt install -y bc bison flex build-essential git ccache curl wget unzip \
-            libssl-dev python3 python-is-python3 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            libncurses-dev rsync zip
+          sudo apt install -y \
+            bc bison flex build-essential git ccache curl wget unzip \
+            libssl-dev python3 python-is-python3 gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi libncurses-dev rsync zip
 
       - name: Download Proton Clang (stable)
         run: |
           mkdir -p clang
           wget -q https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
           unzip -q clang.zip -d clang
-          mv clang/proton-clang-master/* clang/
+          mv clang/proton-clang-master/* clang/ || true
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
           echo "PATH=$PWD/clang/bin:$PATH" >> $GITHUB_ENV
 
@@ -50,7 +51,6 @@ jobs:
           export OBJCOPY=llvm-objcopy
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
-
           make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64
 
       - name: Install modules into temp tree
@@ -58,11 +58,10 @@ jobs:
           rm -rf mod_tmp
           mkdir -p mod_tmp
           make -j1 O=${KBUILD_OUTPUT} ARCH=arm64 INSTALL_MOD_PATH=$PWD/mod_tmp modules_install
-          # Sanity list
-          echo "Installed modules for kernel:"
+          echo "Installed modules (if any):"
           find mod_tmp -type f -name '*.ko' -print || true
 
-      - name: Get kernel release name
+      - name: Get kernel release (KVER)
         id: kernelver
         run: |
           KVER=$(make -s O=${KBUILD_OUTPUT} kernelrelease)
@@ -73,19 +72,15 @@ jobs:
         run: |
           rm -rf AnyKernel
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
-          # ensure the repo is clean (remove .git to keep zip small)
-          rm -rf AnyKernel/.git
+          rm -rf AnyKernel/.git || true
 
-      - name: Patch AnyKernel3 to use split/flash (avoid ramdisk repack)
+      - name: Patch AnyKernel3 to use split_boot + install modules
         run: |
-          # We'll create a small custom anykernel.sh wrapper that sets split_boot/flash_boot behavior.
           # Backup original anykernel.sh
           cp AnyKernel/anykernel.sh AnyKernel/anykernel.sh.orig || true
-
-          # Overwrite anykernel.sh with a minimal wrapper that sources ak3-core.sh and uses split_boot/flash_boot.
+          # Replace anykernel.sh with a minimal wrapper that sources AK3 core and uses split_boot + install_modules
           cat > AnyKernel/anykernel.sh <<'AKSH'
 #!/sbin/sh
-## AnyKernel3 wrapper for safe split flashing (do not repack ramdisk)
 properties() { '
 kernel.string=KaetoKernel (obiwan) by Kaeto
 do.devicecheck=1
@@ -95,48 +90,40 @@ do.cleanup=1
 do.cleanuponabort=0
 '; } # end properties
 
-# set boot/vb/dtbo targets
-# Use by-name base and slot-aware operation for A/B devices
+# A/B slot device, use by-name base
 BLOCK=/dev/block/by-name/boot
 IS_SLOT_DEVICE=1
 
-# We will use split_boot/flash_boot which flashes kernel components without unpacking/repacking ramdisk
-# (this avoids modifying vendor ramdisk which preserves audio and vendor services)
-# import AK3 core (original file should be present)
+# Import AK3 core
 . tools/ak3-core.sh
 
-# Use split_boot to flash kernel/dtb only (skip ramdisk unpack)
+# Use split_boot to flash kernel/dtbo only (no ramdisk repack)
 split_boot
 flash_boot
 
-# install modules from modules/ into vendor or system as AK3 does
+# Install modules bundled in modules/
 install_modules
 AKSH
           chmod +x AnyKernel/anykernel.sh
 
-      - name: Copy kernel images & dtbo into AnyKernel
+      - name: Copy kernel images into AnyKernel
         run: |
-          # copy whichever outputs exist (Image, Image.gz, Image.gz-dtb)
           cp -v out/arch/arm64/boot/Image.gz-dtb AnyKernel/ 2>/dev/null || true
           cp -v out/arch/arm64/boot/Image.gz AnyKernel/ 2>/dev/null || true
           cp -v out/arch/arm64/boot/Image AnyKernel/ 2>/dev/null || true
-          # copy dtbo if present
           cp -v out/arch/arm64/boot/dtbo.img AnyKernel/ 2>/dev/null || true
-          # copy kernel cmdline if you want (optional)
-          # cp -v out/cmdline AnyKernel/ 2>/dev/null || true
 
-      - name: Copy built modules into AnyKernel/modules/<kver>
+      - name: Copy modules into AnyKernel/modules/<kver>
         run: |
           KVER=${{ steps.kernelver.outputs.KVER }}
           mkdir -p "AnyKernel/modules/${KVER}"
-          # If modules_installed, copy them; otherwise continue
           if [ -d "mod_tmp/lib/modules/${KVER}" ]; then
             cp -v mod_tmp/lib/modules/${KVER}/*.ko "AnyKernel/modules/${KVER}/" || true
           fi
-          echo "AnyKernel modules tree now:"
+          echo "AnyKernel modules tree:"
           find AnyKernel/modules -type f -name '*.ko' -print || true
 
-      - name: Create safe AnyKernel config.txt (A/B + modules enabled)
+      - name: Write AnyKernel config.txt
         run: |
           cat > AnyKernel/config.txt <<'CFG'
 kernel.string=KaetoKernel (obiwan) by Kaeto
@@ -158,19 +145,19 @@ supported.patchlevels=
 supported.vendorpatchlevels=
 CFG
 
-      - name: Create flashable AnyKernel zip (safe split flash)
+      - name: Create safe AnyKernel zip
         run: |
           cd AnyKernel
           zip -r9 ../AnyKernel-safe-${GITHUB_SHA}.zip ./*
 
-      - name: Upload AnyKernel SAFE zip
+      - name: Upload AnyKernel-safe zip
         uses: actions/upload-artifact@v4
         with:
           name: AnyKernel-safe-zip
           path: AnyKernel-safe-*.zip
           if-no-files-found: error
 
-      - name: Upload kernel artifacts (+module tar)
+      - name: Upload kernel artifacts and modules
         uses: actions/upload-artifact@v4
         with:
           name: Kernel-artifacts

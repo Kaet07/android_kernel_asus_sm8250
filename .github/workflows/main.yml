@@ -1,159 +1,59 @@
-name: Build Android Kernel (obiwan)
+name: Build Kernel
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 env:
   ARCH: arm64
+  SUBARCH: arm64
   KBUILD_OUTPUT: out
-  CROSS_COMPILE: aarch64-linux-gnu-
   DEFCONFIG: obiwan_defconfig
-  RAMDISK_PATH: ramdisk
-  CMDLINE: "console=tty0"
-  BASE: "0x10000000"
-  PAGESIZE: "4096"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v3
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential bc flex bison libssl-dev libncurses5-dev \
-            ccache curl wget unzip python3 python3-pip \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            abootimg
+          sudo apt update
+          sudo apt install -y bc bison flex build-essential gcc-aarch64-linux-gnu \
+            libssl-dev git ccache curl python3 python-is-python3 mkbootimg-utils
 
-      - name: Prepare environment
+      - name: Setup AArch64 toolchain
         run: |
-          mkdir -p "${KBUILD_OUTPUT}"
-          echo "Using defconfig: ${DEFCONFIG}"
+          mkdir -p toolchain
+          git clone --depth=1 https://github.com/arter97/arm64-gcc toolchain/gcc
+          echo "CROSS_COMPILE=$GITHUB_WORKSPACE/toolchain/gcc/bin/aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      - name: Build kernel
-        shell: bash
+      - name: Make defconfig
         run: |
-          set -euo pipefail
-          export ARCH="${ARCH}"
-          export KBUILD_OUTPUT="${KBUILD_OUTPUT}"
-          export CROSS_COMPILE="${CROSS_COMPILE}"
+          make O=${KBUILD_OUTPUT} $DEFCONFIG
 
-          # configure and build
-          make O="${KBUILD_OUTPUT}" "${DEFCONFIG}"
-          make -j"$(nproc)" O="${KBUILD_OUTPUT}"
-
-          # find kernel image
-          candidates=(
-            "${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image.gz-dtb"
-            "${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image"
-            "${KBUILD_OUTPUT}/arch/${ARCH}/boot/zImage"
-            "${KBUILD_OUTPUT}/arch/${ARCH}/boot/Image.gz"
-          )
-
-          KIMG=""
-          for f in "${candidates[@]}"; do
-            if [ -f "$f" ]; then
-              KIMG="$f"
-              break
-            fi
-          done
-
-          if [ -z "${KIMG}" ]; then
-            echo "Kernel image not found under ${KBUILD_OUTPUT}/arch/${ARCH}/boot"
-            ls -la "${KBUILD_OUTPUT}/arch/${ARCH}/boot" || true
-            exit 1
-          fi
-
-          echo "${KIMG}" > kernel_image.path
-          echo "Found kernel image: ${KIMG}"
-
-      - name: Prepare ramdisk
-        shell: bash
+      - name: Build Kernel
         run: |
-          set -euo pipefail
-          RAM="${RAMDISK_PATH}"
+          make -j$(nproc) O=${KBUILD_OUTPUT}
 
-          if [ -d "${RAM}" ]; then
-            echo "Packing ramdisk directory..."
-            pushd "${RAM}" >/dev/null
-            find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../ramdisk.img
-            popd >/dev/null
-
-          elif [ -f "${RAM}" ]; then
-            echo "Using provided ramdisk file"
-            cp "${RAM}" ramdisk.img
-
-          else
-            echo "Ramdisk not found! Creating tiny fallback..."
-            mkdir -p initramfs
-            cat > initramfs/init <<'SH'
-#!/bin/sh
-exec /bin/sh
-SH
-            chmod +x initramfs/init
-            pushd initramfs >/dev/null
-            find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../ramdisk.img
-            popd >/dev/null
-          fi
-
-          ls -lh ramdisk.img || true
-
-      - name: Create boot.img (mkbootimg if available)
-        shell: bash
+      - name: Build boot.img
         run: |
-          set -euo pipefail
-          if command -v mkbootimg >/dev/null 2>&1; then
-            echo "mkbootimg found; using it"
-            KIMG="$(cat kernel_image.path)"
-            mkbootimg --kernel "${KIMG}" \
-                      --ramdisk ramdisk.img \
-                      --cmdline "${CMDLINE}" \
-                      --base "${BASE}" \
-                      --pagesize "${PAGESIZE}" \
-                      -o boot.img
-            echo "boot.img created by mkbootimg"
-          else
-            echo "mkbootimg not found; deferring to abootimg fallback step"
-          fi
-
-      - name: Fallback: create boot.img with abootimg if needed
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f boot.img ]; then
-            echo "boot.img already exists; skipping abootimg"
-            exit 0
-          fi
-
-          if ! command -v abootimg >/dev/null 2>&1; then
-            echo "Error: abootimg is not installed. Install abootimg or mkbootimg in the runner."
-            exit 1
-          fi
-
-          echo "Creating boot.img using abootimg"
-          KIMG="$(cat kernel_image.path)"
-          cat > bootimg.cfg <<CFG
-cmdline=${CMDLINE}
-base=${BASE}
-pagesize=${PAGESIZE}
-CFG
-
-          abootimg --create boot.img -k "${KIMG}" -r ramdisk.img -f bootimg.cfg
-          echo "boot.img created by abootimg"
+          mkdir -p out_img
+          mkbootimg \
+            --kernel ${KBUILD_OUTPUT}/arch/arm64/boot/Image.gz-dtb \
+            --ramdisk ramdisk.img \
+            --cmdline "console=tty0" \
+            --os_version 12 \
+            --os_patch_level 2023-01 \
+            --base 0x10000000 \
+            --pagesize 2048 \
+            --output out_img/boot.img
 
       - name: Upload boot.img
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: boot.img
-          path: boot.img
+          path: out_img/boot.img

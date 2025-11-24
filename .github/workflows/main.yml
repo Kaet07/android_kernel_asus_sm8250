@@ -19,38 +19,28 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install required packages
+      - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y \
             bc bison flex build-essential git ccache curl wget unzip \
-            libssl-dev python3 python-is-python3
+            libssl-dev python3 python-is-python3 \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi
 
-      - name: Download Proton Clang
+      - name: Download Neutron Clang (r27)
         run: |
-          mkdir -p clang
-          wget https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
-          unzip clang.zip -d clang
-          mv clang/proton-clang-master/* clang/
+          mkdir clang
+          wget https://github.com/Neutron-Clang/neutron-toolchain/releases/download/2024.05/Neutron-2024.05.tar.zst -O clang.tar.zst
+          tar --zstd -xf clang.tar.zst -C clang
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
 
-      - name: Export clang + llvm environment
+      - name: Export toolchain vars
         run: |
-          echo "PATH=$CLANG_PATH/bin:$PATH" >> $GITHUB_ENV
-          echo "CC=clang" >> $GITHUB_ENV
-          echo "HOSTCC=clang" >> $GITHUB_ENV
-          echo "HOSTCXX=clang++" >> $GITHUB_ENV
+          echo "CC=$CLANG_PATH/bin/clang" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
-          echo "LD=ld.lld" >> $GITHUB_ENV
-          echo "AR=llvm-ar" >> $GITHUB_ENV
-          echo "NM=llvm-nm" >> $GITHUB_ENV
-          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
-          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
-          echo "STRIP=llvm-strip" >> $GITHUB_ENV
-          echo "READELF=llvm-readelf" >> $GITHUB_ENV
-          echo "LLVM=1" >> $GITHUB_ENV
-          echo "LLVM_IAS=1" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
       - name: Make defconfig
         run: |
@@ -58,17 +48,22 @@ jobs:
 
       - name: Build Kernel
         run: |
-          make -j$(nproc) O=${KBUILD_OUTPUT}
+          make -j$(nproc) \
+            O=${KBUILD_OUTPUT} \
+            CC="$CLANG_PATH/bin/clang" \
+            LLVM=1 \
+            ARCH=arm64
 
       - name: Build DTBO
         run: |
-          make -j$(nproc) O=${KBUILD_OUTPUT} dtboimg || true
+          make -j$(nproc) \
+            O=${KBUILD_OUTPUT} ARCH=arm64 dtboimg || true
 
       - name: Clone AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
 
-      - name: Copy kernel files into AnyKernel
+      - name: Copy kernel output
         run: |
           cp out/arch/arm64/boot/Image.gz-dtb AnyKernel/ || true
           cp out/arch/arm64/boot/Image.gz AnyKernel/ || true
@@ -76,23 +71,13 @@ jobs:
           cp out/arch/arm64/boot/dtbo.img AnyKernel/ || true
           rm -f AnyKernel/patch AnyKernel/modules || true
 
-      - name: Create flashable zip
+      - name: Create flashable ZIP
         run: |
           cd AnyKernel
           zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
 
-      - name: Upload Kernel Files
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-Artifacts
-          path: |
-            out/arch/arm64/boot/Image
-            out/arch/arm64/boot/Image.gz
-            out/arch/arm64/boot/Image.gz-dtb
-            out/arch/arm64/boot/dtbo.img
-
-      - name: Upload AnyKernel zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: Flashable-AnyKernel3
+          name: Flashable-Kernel
           path: AnyKernel-*.zip

@@ -19,27 +19,26 @@ jobs:
         sudo apt install -y bc bison flex build-essential curl wget git unzip python3 \
           libssl-dev rsync ccache libelf-dev libc6-dev libncurses-dev
 
-    - name: Setup Clang
+    - name: Setup Clang 17
       run: |
         mkdir -p clang
         cd clang
-        wget https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.1/clang+llvm-17.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-        tar -xf clang+llvm-17.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-        mv clang+llvm-17.0.1-x86_64-linux-gnu-ubuntu-22.04 clang-17
+        wget https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.1/clang+llvm-17.0.1-x86_64-linux-gnu.tar.xz
+        tar -xf clang+llvm-17.0.1-x86_64-linux-gnu.tar.xz
+        mv clang+llvm-17.0.1-x86_64-linux-gnu clang-17
         cd ..
-
         echo "CLANG_PATH=$(pwd)/clang/clang-17" >> $GITHUB_ENV
 
-    - name: Configure kernel
+    - name: Configure Kernel (obiwan_defconfig)
       run: |
         export PATH=$CLANG_PATH/bin:$PATH
         make O=out ARCH=arm64 obiwan_defconfig
 
-    - name: Build kernel
+    - name: Build Kernel
       run: |
         export PATH=$CLANG_PATH/bin:$PATH
-        export LD=ld.lld
         export CC=clang
+        export LD=ld.lld
         export AR=llvm-ar
         export NM=llvm-nm
         export OBJCOPY=llvm-objcopy
@@ -48,44 +47,41 @@ jobs:
 
         make -j$(nproc) O=out ARCH=arm64
 
-    - name: Build dtbo
+    - name: Build DTBO
       run: |
         export PATH=$CLANG_PATH/bin:$PATH
         make -j$(nproc) O=out ARCH=arm64 dtboimg || true
 
-    # --- ANYKERNEL3 PACKING ---
+    # PACKAGING WITH ANYKERNEL3
     - name: Clone AnyKernel3
       run: |
         git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
 
-    - name: Copy kernel files into AnyKernel3
+    - name: Copy Kernel Files into AnyKernel3
       run: |
-        cp out/arch/arm64/boot/Image.gz AnyKernel/
+        cp out/arch/arm64/boot/Image.gz AnyKernel/ || true
         cp out/arch/arm64/boot/Image.gz-dtb AnyKernel/ || true
         cp out/arch/arm64/boot/dtbo.img AnyKernel/ || true
-
-        # Remove unused placeholders
         rm -f AnyKernel/modules AnyKernel/patch || true
 
-    - name: Create AnyKernel flashable zip
+    - name: Create Flashable AnyKernel ZIP
       run: |
         cd AnyKernel
-        zip -r9 ../kernel-${GITHUB_SHA}-AnyKernel.zip ./*
+        zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
 
-    # --- BOOT.IMG BUILD (using mkbootimg from AOSP) ---
-    - name: Download AOSP mkbootimg
+    # mkbootimg for boot.img creation
+    - name: Download mkbootimg
       run: |
-        wget https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/master/mkbootimg.py?format=TEXT -O mkbootimg.b64
+        wget "https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/master/mkbootimg.py?format=TEXT" -O mkbootimg.b64
         base64 -d mkbootimg.b64 > mkbootimg
         chmod +x mkbootimg
 
     - name: Create boot.img
       run: |
-        # Change paths if needed
         ./mkbootimg \
           --kernel out/arch/arm64/boot/Image.gz \
-          --ramdisk ramdisk.img \
           --dtb out/arch/arm64/boot/dtb.img \
+          --ramdisk ramdisk.img \
           --pagesize 4096 \
           --base 0x00000000 \
           --kernel_offset 0x00008000 \
@@ -93,12 +89,12 @@ jobs:
           --tags_offset 0x00000100 \
           --output boot.img || true
 
-    # --- UPLOAD ARTIFACTS ---
-    - name: Upload AnyKernel zip
+    # UPLOAD ARTIFACTS
+    - name: Upload AnyKernel ZIP
       uses: actions/upload-artifact@v4
       with:
         name: Flashable-AnyKernel3
-        path: kernel-*-AnyKernel.zip
+        path: AnyKernel-*.zip
 
     - name: Upload boot.img
       uses: actions/upload-artifact@v4

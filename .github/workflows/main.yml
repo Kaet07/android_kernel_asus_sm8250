@@ -16,11 +16,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout source
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # 2. Install required packages
       - name: Install required packages
         run: |
           sudo apt update
@@ -29,7 +27,6 @@ jobs:
             libssl-dev python3 python-is-python3 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      # 3. Download Proton Clang
       - name: Download Proton Clang
         run: |
           mkdir -p clang
@@ -39,7 +36,6 @@ jobs:
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH
 
-      # 4. Export toolchain variables
       - name: Export toolchain variables
         run: |
           echo "CC=$CLANG_PATH/bin/clang" >> $GITHUB_ENV
@@ -47,26 +43,21 @@ jobs:
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      # 5. Make defconfig
       - name: Make defconfig
         run: |
           make O=${KBUILD_OUTPUT} $DEFCONFIG
 
-      # 6. Build Kernel Image
       - name: Build Kernel
         run: |
           make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64 CC="$CLANG_PATH/bin/clang"
 
-      # 7. Build DTBO
       - name: Build DTBO
         run: |
           make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64 dtboimg || true
 
-      # 8. Build custom kernel module (.ko)
       - name: Build Custom Kernel Module
         run: |
           mkdir -p kernel/my_module
-          # Create example module source
           cat > kernel/my_module/my_module.c << 'EOF'
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -99,7 +90,6 @@ module_exit(my_exit);
 MODULE_LICENSE("GPL");
 EOF
 
-          # Create Makefile for module
           cat > kernel/my_module/Makefile << 'EOF'
 obj-m := my_module.o
 KDIR := $(PWD)/../../
@@ -112,17 +102,14 @@ clean:
 	$(MAKE) -C $(KDIR) O=$(KDIR)/out M=$(PWD) clean
 EOF
 
-          # Build the module
           cd kernel/my_module
           make -j$(nproc)
           cp my_module.ko $GITHUB_WORKSPACE/out/
 
-      # 9. Clone AnyKernel3
       - name: Clone AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
 
-      # 10. Copy kernel + module to AnyKernel3
       - name: Copy kernel and module
         run: |
           cp out/arch/arm64/boot/Image.gz-dtb AnyKernel/ || true
@@ -132,14 +119,12 @@ EOF
           mkdir -p AnyKernel/modules
           cp out/my_module.ko AnyKernel/modules/ || true
 
-      # 11. Create flashable ZIP
       - name: Create AnyKernel3 ZIP
         run: |
           cd AnyKernel
           zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
 
-      # 12. Upload Kernel Artifacts
-      - name: Upload Kernel Files
+      - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Kernel-Artifacts
@@ -151,7 +136,6 @@ EOF
             out/my_module.ko
           if-no-files-found: warn
 
-      # 13. Upload AnyKernel3 ZIP
       - name: Upload AnyKernel3 ZIP
         uses: actions/upload-artifact@v4
         with:

@@ -1,99 +1,99 @@
-name: Build Kernel + AnyKernel
+name: Build Kernel
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
   workflow_dispatch:
 
 env:
   ARCH: arm64
+  SUBARCH: arm64
   KBUILD_OUTPUT: out
   DEFCONFIG: obiwan_defconfig
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install packages
+      - name: Install required packages
         run: |
           sudo apt update
-          sudo apt install -y bc bison flex git build-essential \
-          ccache curl wget unzip gcc-aarch64-linux-gnu \
-          gcc-arm-linux-gnueabi python3 libssl-dev zip rsync
+          sudo apt install -y \
+            bc bison flex build-essential git ccache curl wget unzip \
+            libssl-dev python3 python-is-python3 \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi
 
       - name: Download Proton Clang
         run: |
           mkdir -p clang
-          wget -q https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O pc.zip
-          unzip -q pc.zip -d clang
+          wget https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
+          unzip clang.zip -d clang
           mv clang/proton-clang-master/* clang/
-          echo "$PWD/clang/bin" >> $GITHUB_PATH
+          echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
+
+      - name: Export toolchain variables
+        run: |
+          echo "CC=${CLANG_PATH}/bin/clang" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
       - name: Make defconfig
         run: |
-          make O=${KBUILD_OUTPUT} ARCH=arm64 ${DEFCONFIG}
+          make O=${KBUILD_OUTPUT} $DEFCONFIG
 
-      - name: Build kernel + modules
+      - name: Build Kernel (Proton Clang)
         run: |
-          export CC=clang
-          export LD=ld.lld
-          make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64
+          make -j$(nproc) O=${KBUILD_OUTPUT} \
+            CC="${CLANG_PATH}/bin/clang" \
+            ARCH=arm64
 
-      - name: Install modules
+      - name: Build DTBO (optional)
         run: |
-          rm -rf mod_tmp
-          mkdir mod_tmp
-          make O=${KBUILD_OUTPUT} ARCH=arm64 INSTALL_MOD_PATH=$PWD/mod_tmp modules_install
+          make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64 dtboimg || true
 
+      # ------------------------------
+      # ANYKERNEL3 PACKAGING SECTION
+      # ------------------------------
       - name: Clone AnyKernel3
         run: |
-          rm -rf AnyKernel
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
-          rm -rf AnyKernel/.git
 
-      - name: Replace anykernel.sh (no heredoc!)
+      - name: Copy kernel output to AnyKernel3
         run: |
-          echo "#!/sbin/sh" > AnyKernel/anykernel.sh
-          echo "properties() { '" >> AnyKernel/anykernel.sh
-          echo "kernel.string=KaetoKernel" >> AnyKernel/anykernel.sh
-          echo "do.devicecheck=0" >> AnyKernel/anykernel.sh
-          echo "do.modules=1" >> AnyKernel/anykernel.sh
-          echo "do.systemless=1" >> AnyKernel/anykernel.sh
-          echo "do.cleanup=1" >> AnyKernel/anykernel.sh
-          echo "do.cleanuponabort=0" >> AnyKernel/anykernel.sh
-          echo "'; }" >> AnyKernel/anykernel.sh
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel/ || true
+          cp out/arch/arm64/boot/Image.gz AnyKernel/ || true
+          cp out/arch/arm64/boot/Image AnyKernel/ || true
+          cp out/arch/arm64/boot/dtbo.img AnyKernel/ || true
+          rm -f AnyKernel/patch AnyKernel/modules || true
 
-          echo "BLOCK=/dev/block/by-name/boot" >> AnyKernel/anykernel.sh
-          echo "IS_SLOT_DEVICE=1" >> AnyKernel/anykernel.sh
-
-          echo ". tools/ak3-core.sh" >> AnyKernel/anykernel.sh
-          echo "split_boot" >> AnyKernel/anykernel.sh
-          echo "flash_boot" >> AnyKernel/anykernel.sh
-          echo "install_modules" >> AnyKernel/anykernel.sh
-          chmod +x AnyKernel/anykernel.sh
-
-      - name: Copy kernel images
-        run: |
-          cp out/arch/arm64/boot/Image* AnyKernel/ 2>/dev/null || true
-          cp out/arch/arm64/boot/dtbo.img AnyKernel/ 2>/dev/null || true
-
-      - name: Copy modules
-        run: |
-          KVER=$(make -s O=${KBUILD_OUTPUT} kernelrelease)
-          mkdir -p AnyKernel/modules/$KVER
-          cp mod_tmp/lib/modules/$KVER/*.ko AnyKernel/modules/$KVER/ 2>/dev/null || true
-
-      - name: Create ZIP
+      - name: Create flashable ZIP
         run: |
           cd AnyKernel
-          zip -r9 ../AnyKernel-${GITHUB_SHA}.zip .
+          zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
 
-      - name: Upload ZIP
+      # ------------------------------
+      # UPLOAD ARTIFACTS
+      # ------------------------------
+      - name: Upload Kernel Files
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel
+          name: Kernel-Artifacts
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/Image.gz-dtb
+            out/arch/arm64/boot/dtbo.img
+          if-no-files-found: warn
+
+      - name: Upload AnyKernel3 ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Flashable-AnyKernel3
           path: AnyKernel-*.zip
+          if-no-files-found: error

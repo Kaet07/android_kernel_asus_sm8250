@@ -22,29 +22,37 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt update
-          sudo apt install -y bc bison flex build-essential gcc-aarch64-linux-gnu \
-            libssl-dev git ccache curl python3 python-is-python3
+          sudo apt install -y bc bison flex build-essential git ccache curl \
+            libssl-dev python3 python-is-python3
 
-      - name: Install AOSP mkbootimg
+      - name: Download Google Clang 14
         run: |
-          git clone https://android.googlesource.com/platform/system/tools/mkbootimg --depth=1
-          sudo install -m 0755 mkbootimg/mkbootimg.py /usr/local/bin/mkbootimg
-          sudo install -m 0755 mkbootimg/unpack_bootimg.py /usr/local/bin/unpack_bootimg
-          sudo ln -sf /usr/bin/python3 /usr/bin/python
+          mkdir -p clang
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r5/clang-r450784d.tar.gz -O clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+          echo "CLANG_PATH=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
 
-      - name: Setup AArch64 toolchain
+      - name: Export toolchain variables
         run: |
-          mkdir -p toolchain
-          git clone --depth=1 https://github.com/arter97/arm64-gcc toolchain/gcc
-          echo "CROSS_COMPILE=$GITHUB_WORKSPACE/toolchain/gcc/bin/aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CC=${CLANG_PATH}/clang" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-android-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE_ARM32=arm-linux-androideabi-" >> $GITHUB_ENV
 
       - name: Make defconfig
         run: |
           make O=${KBUILD_OUTPUT} $DEFCONFIG
 
-      - name: Build Kernel
+      - name: Build Kernel with Clang
         run: |
-          make -j$(nproc) O=${KBUILD_OUTPUT}
+          make -j$(nproc) O=${KBUILD_OUTPUT} \
+            CC="${CLANG_PATH}/clang" \
+            ARCH=arm64
+
+      - name: Install AOSP mkbootimg
+        run: |
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg --depth=1
+          sudo install -m 0755 mkbootimg/mkbootimg.py /usr/local/bin/mkbootimg
 
       - name: Build boot.img
         run: |
@@ -53,8 +61,6 @@ jobs:
             --kernel ${KBUILD_OUTPUT}/arch/arm64/boot/Image.gz-dtb \
             --ramdisk ramdisk.img \
             --cmdline "console=tty0" \
-            --os_version 12 \
-            --os_patch_level 2023-01 \
             --base 0x10000000 \
             --pagesize 2048 \
             --output out_img/boot.img

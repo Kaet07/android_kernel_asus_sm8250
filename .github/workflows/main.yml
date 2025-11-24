@@ -1,19 +1,19 @@
-name: Build Kernel + AnyKernel (with modules)
+name: Build Kernel
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
   workflow_dispatch:
 
 env:
   ARCH: arm64
-  KBUILD_OUTPUT: out
+  SUBARCH: arm64
   DEFCONFIG: obiwan_defconfig
+  KBUILD_OUTPUT: out
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
 
     steps:
       - name: Checkout source
@@ -22,137 +22,64 @@ jobs:
       - name: Install required packages
         run: |
           sudo apt update
-          sudo apt install -y \
-            bc bison flex build-essential git ccache curl wget unzip \
-            libssl-dev python3 python-is-python3 \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            libncurses-dev
+          sudo apt install -y bc bison flex build-essential git curl wget unzip \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libc6-dev libssl-dev
 
-      - name: Download Proton Clang
+      - name: Download & extract Proton Clang
         run: |
-          mkdir -p clang
+          mkdir clang
           wget https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
-          unzip -q clang.zip -d clang
-          mv clang/proton-clang-master/* clang/ || true
-          # Export CLANG_PATH into GITHUB_ENV with an absolute path
-          echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
-          echo "PATH=$PWD/clang/bin:$PATH" >> $GITHUB_ENV
+          unzip clang.zip -d clang
+          mv clang/proton-clang-master/* clang/
 
-      - name: Export toolchain variables
+      - name: Export toolchain paths
         run: |
-          # append common toolchain envs
-          echo "CC=${CLANG_PATH}/bin/clang" >> $GITHUB_ENV
+          echo "CLANG_PATH=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
+          echo "CC=$GITHUB_WORKSPACE/clang/bin/clang" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      - name: Configure kernel (obiwan_defconfig)
+      - name: Configure defconfig
         run: |
-          export PATH="$CLANG_PATH/bin:$PATH"
-          make O=${KBUILD_OUTPUT} ARCH=arm64 ${DEFCONFIG}
+          make O=${KBUILD_OUTPUT} $DEFCONFIG
 
-      - name: Build kernel and modules
+      - name: Build kernel + modules
         run: |
-          export PATH="$CLANG_PATH/bin:$PATH"
-          export CC="$CLANG_PATH/bin/clang"
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
+          make -j$(nproc) O=${KBUILD_OUTPUT} \
+            CC="${CLANG_PATH}/clang" \
+            ARCH=arm64
 
-          make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64
-
-      - name: Install modules into temporary tree
+      - name: Install kernel modules
         run: |
-          rm -rf mod_tmp
-          mkdir -p mod_tmp
-          make -j1 O=${KBUILD_OUTPUT} ARCH=arm64 INSTALL_MOD_PATH=$PWD/mod_tmp modules_install
-          echo "Installed modules (summary):"
-          find mod_tmp -maxdepth 4 -type f -name "*.ko" -print || true
+          mkdir -p out/modules
+          make O=${KBUILD_OUTPUT} modules_install INSTALL_MOD_PATH=out/modules
 
-      - name: Determine kernel release (KVER)
-        id: kernelver
+      - name: Clone AnyKernel3
         run: |
-          KVER=$(make -s O=${KBUILD_OUTPUT} kernelrelease)
-          echo "KVER=${KVER}"
-          # write to GITHUB_OUTPUT (supported method)
-          echo "KVER=${KVER}" >> "$GITHUB_OUTPUT"
+          git clone https://github.com/osm0sis/AnyKernel3.git ak3
+          rm -rf ak3/.git
+          rm -rf ak3/modules
+          mkdir -p ak3/modules/vendor/lib/modules
+          cp -r out/modules/lib/modules/* ak3/modules/vendor/lib/modules/
 
-      - name: Prepare AnyKernel3 directory
+      - name: Copy kernel image into AnyKernel3
         run: |
-          rm -rf AnyKernel
-          git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
-          mkdir -p "AnyKernel/modules/${{ steps.kernelver.outputs.KVER }}"
-          if [ -d "mod_tmp/lib/modules/${{ steps.kernelver.outputs.KVER }}" ]; then
-            cp -v mod_tmp/lib/modules/${{ steps.kernelver.outputs.KVER }}/*.ko "AnyKernel/modules/${{ steps.kernelver.outputs.KVER }}/" || true
-          else
-            echo "No modules installed for kernel ${ { steps.kernelver.outputs.KVER } } (continuing)"
-          fi
+          cp out/arch/arm64/boot/Image.gz-dtb ak3/
 
-      - name: Place kernel images in AnyKernel
+      - name: Fix AnyKernel3 properties
         run: |
-          cp -v out/arch/arm64/boot/Image.gz-dtb AnyKernel/ 2>/dev/null || true
-          cp -v out/arch/arm64/boot/Image.gz AnyKernel/ 2>/dev/null || true
-          cp -v out/arch/arm64/boot/Image AnyKernel/ 2>/dev/null || true
-          cp -v out/arch/arm64/boot/dtbo.img AnyKernel/ 2>/dev/null || true
-
-      - name: Write AnyKernel config for obiwan (enable module support)
-        run: |
-          cat > AnyKernel/config.txt <<'CFG'
-kernel.string=KaetoKernel (obiwan) by Kaeto
-do.devicecheck=1
-do.modules=1
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-
-# A/B device (slot-based)
-is_slot_device=1
-
-# Boot partition base name used to detect slot
-block=/dev/block/by-name/boot
-
-# Device names (allow variants)
-device.name1=obiwan
-device.name2=ZS661KS
-device.name3=ZS661KL
-device.name4=ASUS_I003_1
-device.name5=I003D
-device.name6=I003DD
-
-supported.versions=
-supported.patchlevels=
-supported.vendorpatchlevels=
-CFG
-
-      - name: Ensure AnyKernel modules presence
-        run: |
-          echo "AnyKernel modules tree:"
-          find AnyKernel/modules -type f -name "*.ko" -print || echo "No .ko files present (that's okay if none built)."
+          sed -i 's/do.devicecheck=.*/do.devicecheck=0/' ak3/anykernel.sh
+          sed -i 's|BLOCK=.*|IS_SLOT_DEVICE=1|' ak3/anykernel.sh
+          sed -i 's|BLOCK=.*|# Auto-slot device|' ak3/anykernel.sh
 
       - name: Create flashable AnyKernel zip
         run: |
-          cd AnyKernel
-          zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
+          cd ak3
+          zip -r9 ../AnyKernel3-Kernel.zip .
 
-      - name: Upload AnyKernel flashable ZIP
+      - name: Upload flashable kernel zip
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel-Flashable
-          path: AnyKernel-*.zip
-          if-no-files-found: error
-
-      - name: Upload kernel artifacts (images and modules)
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kernel-Artifacts
-          path: |
-            out/arch/arm64/boot/Image
-            out/arch/arm64/boot/Image.gz
-            out/arch/arm64/boot/Image.gz-dtb
-            out/arch/arm64/boot/dtbo.img
-            mod_tmp/lib/modules/${{ steps.kernelver.outputs.KVER }}/*.ko
-          if-no-files-found: warn
+          name: AnyKernel3-Kernel
+          path: AnyKernel3-Kernel.zip

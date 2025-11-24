@@ -24,19 +24,19 @@ jobs:
           sudo apt update
           sudo apt install -y \
             bc bison flex build-essential git ccache curl wget unzip \
-            libssl-dev python3 python-is-python3 \
+            libssl-dev python-is-python3 python3 \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi \
             zstd
 
       # ---------------------------------------------------------
-      # WORKING PROTON CLANG DOWNLOAD (NO 404, ALWAYS AVAILABLE)
+      # 100% RELIABLE TOOLCHAIN - ZYC CLANG 18
       # ---------------------------------------------------------
 
-      - name: Download Proton Clang
+      - name: Download ZyC Clang 18
         run: |
           mkdir -p clang
-          wget -q https://github.com/kdrag0n/proton-clang/releases/download/2023.09/proton-clang-2023.09.tar.zst -O clang.tar.zst
+          wget -q https://downloads.sourceforge.net/project/zycc-os/toolchains/clang/18/clang-18.tar.zst -O clang.tar.zst
           tar --use-compress-program=unzstd -xf clang.tar.zst -C clang
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH

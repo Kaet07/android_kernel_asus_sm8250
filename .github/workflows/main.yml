@@ -55,57 +55,39 @@ jobs:
       - name: Confirm module directory exists
         run: |
           if [ ! -d "${MODULE_DIR}" ]; then
-            echo "ERROR: Module directory '${MODULE_DIR}' not found in repo."
-            echo "Please add your module source at that path (example: ${MODULE_DIR}/mymodule.c and Makefile)."
+            echo "ERROR: Module directory '${MODULE_DIR}' not found."
             exit 1
           fi
-          echo "Module directory found: ${MODULE_DIR}"
-          ls -la "${MODULE_DIR}" || true
+          ls -la "${MODULE_DIR}"
 
       - name: Build out-of-tree module(s)
         run: |
           export PATH="$CLANG_PATH/bin:$PATH"
           export CC=clang
           export ARCH=arm64
-          make -C . O=${KBUILD_OUTPUT} M="${MODULE_DIR}" CC="$CLANG_PATH/bin/clang" -j$(nproc) || (echo "module build failed" && exit 1)
+          make -C . O=${KBUILD_OUTPUT} M="${MODULE_DIR}" CC="$CLANG_PATH/bin/clang" -j$(nproc)
           mkdir -p out/modules
-          cp -v "${MODULE_DIR}"/*.ko out/modules/ 2>/dev/null || true
-          echo "Built modules:"
-          ls -la out/modules || true
-
-      - name: Optionally sign modules (if secrets provided)
-        if: ${{ secrets.MODULE_SIGN_KEY != '' && secrets.MODULE_SIGN_CERT != '' }}
-        run: |
-          echo "${{ secrets.MODULE_SIGN_KEY }}" > sign_key.pem
-          echo "${{ secrets.MODULE_SIGN_CERT }}" > sign_cert.pem
-          chmod 600 sign_key.pem
-          for ko in out/modules/*.ko; do
-            if [ -f "$ko" ]; then
-              echo "Signing $ko"
-              scripts/sign-file sha512 sign_key.pem sign_cert.pem "$ko" || (echo "sign failed" && exit 1)
-            fi
-          done
-          rm -f sign_key.pem sign_cert.pem
+          cp -v "${MODULE_DIR}"/*.ko out/modules/ || true
+          ls -la out/modules
 
       - name: Clone AnyKernel3 for packaging
         run: |
           rm -rf AnyKernel || true
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
-          rm -rf AnyKernel/.git || true
+          rm -rf AnyKernel/.git
 
       - name: Copy .ko into AnyKernel
         run: |
           mkdir -p AnyKernel/modules
-          cp -v out/modules/*.ko AnyKernel/modules/ 2>/dev/null || true
-          echo "AnyKernel modules:"
-          find AnyKernel/modules -type f -name '*.ko' -print || true
+          cp -v out/modules/*.ko AnyKernel/modules/ || true
+          find AnyKernel/modules -type f
 
-      - name: Create AnyKernel module zip
+      - name: Create AnyKernel zip
         run: |
           cd AnyKernel
-          zip -r9 ../AnyKernel-module-${GITHUB_SHA}.zip ./*
+          zip -r9 ../AnyKernel-module-${GITHUB_SHA}.zip .
 
-      - name: Upload module artifacts (.ko + zip)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: module-artifacts

@@ -1,144 +1,129 @@
-name: Build Kernel + Module + AnyKernel3
+name: Build Module Only (MODULE_DIR) + AnyKernel
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
   ARCH: arm64
-  SUBARCH: arm64
   KBUILD_OUTPUT: out
-  DEFCONFIG: obiwan_defconfig
+  DEFCONFIG: arch/arm64/configs/obiwan_defconfig
+  MODULE_DIR: kernel/out_of_tree/kaeto_mod
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-module:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Install required packages
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y \
-            bc bison flex build-essential git ccache curl wget unzip \
-            libssl-dev python3 python-is-python3 \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          sudo apt install -y bc build-essential curl wget unzip git ccache \
+            python3 python-is-python3 rsync zip zstd \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang lld
 
-      - name: Download Proton Clang
+      - name: Download AOSP Clang
         run: |
           mkdir -p clang
-          wget -q https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
-          unzip clang.zip -d clang
-          mv clang/proton-clang-master/* clang/
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r530567.tar.gz -O clang.tar.gz
+          tar -xzf clang.tar.gz -C clang --strip-components=1
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH
 
-      - name: Export toolchain variables
+      - name: Print environment
         run: |
-          echo "CC=$CLANG_PATH/bin/clang" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
-          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "Using defconfig: $DEFCONFIG"
+          echo "Module dir: $MODULE_DIR"
+          clang --version | head -n 2
 
-      - name: Make defconfig
+      - name: Prepare kernel (modules_prepare)
         run: |
-          make O=${KBUILD_OUTPUT} $DEFCONFIG
+          export PATH="$CLANG_PATH/bin:$PATH"
+          export CC=clang
+          make O=${KBUILD_OUTPUT} ARCH=${ARCH} ${DEFCONFIG}
+          make -C . O=${KBUILD_OUTPUT} ARCH=${ARCH} modules_prepare
 
-      - name: Build Kernel
+      - name: Ensure module dir or create example module
         run: |
-          make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64 CC="$CLANG_PATH/bin/clang"
+          export MODULE_DIR="$MODULE_DIR"
+          if [ ! -d "$MODULE_DIR" ]; then
+            echo "Module directory missing. Creating example module."
+            mkdir -p "$MODULE_DIR"
 
-      - name: Build DTBO
-        run: |
-          make -j$(nproc) O=${KBUILD_OUTPUT} ARCH=arm64 dtboimg || true
+            cat > "$MODULE_DIR/kaeto_mod.c" << 'C_SRC'
+/* kaeto_mod.c - safe example char device */ 
 
-      - name: Build Custom Kernel Module
-        run: |
-          mkdir -p kernel/my_module
-          cat > kernel/my_module/my_module.c << 'EOF'
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/proc_fs.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
 
-static struct proc_dir_entry *entry;
+#define DEVICE_NAME "kaeto"
+static int major;
 
-static ssize_t my_read(struct file *filp, char __user *buf, size_t count, loff_t *off) {
-    const char msg[] = "Hello from kernel module\n";
-    return simple_read_from_buffer(buf, count, off, msg, sizeof(msg)-1);
+static ssize_t dummy_read(struct file *f, char __user *buf, size_t len, loff_t *off) {
+    const char msg[] = "kaeto example\n";
+    return simple_read_from_buffer(buf, len, off, msg, sizeof(msg)-1);
 }
 
-static const struct proc_ops fops = {
-    .proc_read = my_read,
+static const struct file_operations fops = {
+    .owner = THIS_MODULE,
+    .read  = dummy_read,
 };
 
-static int __init my_init(void) {
-    entry = proc_create("my_module", 0444, NULL, &fops);
-    printk(KERN_INFO "my_module loaded\n");
+static int __init kaeto_init(void) {
+    major = register_chrdev(0, DEVICE_NAME, &fops);
+    pr_info("kaeto example loaded (major=%d)\n", major);
     return 0;
 }
 
-static void __exit my_exit(void) {
-    proc_remove(entry);
-    printk(KERN_INFO "my_module unloaded\n");
+static void __exit kaeto_exit(void) {
+    unregister_chrdev(major, DEVICE_NAME);
+    pr_info("kaeto example unloaded\n");
 }
 
-module_init(my_init);
-module_exit(my_exit);
+module_init(kaeto_init);
+module_exit(kaeto_exit);
 MODULE_LICENSE("GPL");
-EOF
+MODULE_AUTHOR("Example");
+MODULE_DESCRIPTION("Safe demo module");
+C_SRC
 
-          cat > kernel/my_module/Makefile << 'EOF'
-obj-m := my_module.o
-KDIR := $(PWD)/../../
-PWD := $(shell pwd)
+            cat > "$MODULE_DIR/Makefile" << 'MK'
+obj-m := kaeto_mod.o
+MK
+          fi
 
-all:
-	$(MAKE) -C $(KDIR) O=$(KDIR)/out M=$(PWD) modules
-
-clean:
-	$(MAKE) -C $(KDIR) O=$(KDIR)/out M=$(PWD) clean
-EOF
-
-          cd kernel/my_module
-          make -j$(nproc)
-          cp my_module.ko $GITHUB_WORKSPACE/out/
+      - name: Build module
+        run: |
+          export PATH="$CLANG_PATH/bin:$PATH"
+          make -C . O=${KBUILD_OUTPUT} M="$MODULE_DIR" CC=clang -j$(nproc)
+          mkdir -p out/modules
+          cp -v "$MODULE_DIR"/*.ko out/modules/
 
       - name: Clone AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
+          rm -rf AnyKernel/.git
 
-      - name: Copy kernel and module
+      - name: Package into AnyKernel
         run: |
-          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel/ || true
-          cp out/arch/arm64/boot/Image.gz AnyKernel/ || true
-          cp out/arch/arm64/boot/Image AnyKernel/ || true
-          cp out/arch/arm64/boot/dtbo.img AnyKernel/ || true
           mkdir -p AnyKernel/modules
-          cp out/my_module.ko AnyKernel/modules/ || true
-
-      - name: Create AnyKernel3 ZIP
-        run: |
+          cp -v out/modules/*.ko AnyKernel/modules/
           cd AnyKernel
-          zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
+          zip -r9 ../AnyKernel-module-${GITHUB_SHA}.zip ./*
 
-      - name: Upload Kernel Artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-Artifacts
+          name: module-artifacts
           path: |
-            out/arch/arm64/boot/Image
-            out/arch/arm64/boot/Image.gz
-            out/arch/arm64/boot/Image.gz-dtb
-            out/arch/arm64/boot/dtbo.img
-            out/my_module.ko
-          if-no-files-found: warn
-
-      - name: Upload AnyKernel3 ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: Flashable-AnyKernel3
-          path: AnyKernel-*.zip
-          if-no-files-found: error
+            out/modules/*.ko
+            AnyKernel-module-*.zip

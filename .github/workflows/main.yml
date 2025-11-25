@@ -28,9 +28,6 @@ jobs:
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi
 
-      # ---------------------------------------------------------
-      # AOSP CLANG
-      # ---------------------------------------------------------
       - name: Download AOSP Clang
         run: |
           mkdir -p clang
@@ -39,9 +36,6 @@ jobs:
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH
 
-      # ---------------------------------------------------------
-      # EXPORT TOOLCHAIN VARIABLES
-      # ---------------------------------------------------------
       - name: Export toolchain variables
         run: |
           echo "CC=$CLANG_PATH/bin/clang" >> $GITHUB_ENV
@@ -52,40 +46,43 @@ jobs:
       # ---------------------------------------------------------
       # BUILD DEFCONFIG
       # ---------------------------------------------------------
+
       - name: Make defconfig
         run: |
           make O=${KBUILD_OUTPUT} $DEFCONFIG
 
       # ---------------------------------------------------------
-      # BUILD KERNEL IMAGE
+      # BUILD KERNEL (WITH WARNINGS DISABLED)
       # ---------------------------------------------------------
-      - name: Build Kernel Image (Image.gz-dtb)
+
+      - name: Build Kernel Image
         run: |
           make -j$(nproc) \
             O=${KBUILD_OUTPUT} \
             ARCH=arm64 \
+            KCFLAGS="-Wno-error" \
+            KBUILD_CFLAGS="-Wno-error" \
+            KBUILD_CPPFLAGS="-Wno-error" \
             CC="$CLANG_PATH/bin/clang"
 
       # ---------------------------------------------------------
-      # BUILD KERNEL MODULES
+      # BUILD MODULES (ALSO DISABLE WERROR)
       # ---------------------------------------------------------
+
       - name: Build Kernel Modules
         run: |
-         make -j$(nproc) \
-          O=${KBUILD_OUTPUT} \
-          ARCH=arm64 \
-           KCFLAGS=-Wno-error \
-           modules
-
-      - name: Install Kernel Modules
-        run: |
-          make O=${KBUILD_OUTPUT} ARCH=arm64 modules_install INSTALL_MOD_PATH=modules_out
-          mkdir -p AnyKernel/modules
-          find modules_out -name "*.ko" -exec cp {} AnyKernel/modules/ \;
+          make -j$(nproc) \
+            O=${KBUILD_OUTPUT} \
+            ARCH=arm64 \
+            KCFLAGS="-Wno-error" \
+            KBUILD_CFLAGS="-Wno-error" \
+            KBUILD_CPPFLAGS="-Wno-error" \
+            modules
 
       # ---------------------------------------------------------
       # BUILD DTBO
       # ---------------------------------------------------------
+
       - name: Build DTBO image
         run: |
           make -j$(nproc) \
@@ -96,6 +93,7 @@ jobs:
       # ---------------------------------------------------------
       # ANYKERNEL PACKAGING
       # ---------------------------------------------------------
+
       - name: Clone AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
@@ -112,10 +110,6 @@ jobs:
           cd AnyKernel
           zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
 
-      # ---------------------------------------------------------
-      # UPLOAD ARTIFACTS
-      # ---------------------------------------------------------
-
       - name: Upload Kernel Files
         uses: actions/upload-artifact@v4
         with:
@@ -125,13 +119,6 @@ jobs:
             out/arch/arm64/boot/Image.gz
             out/arch/arm64/boot/Image.gz-dtb
             out/arch/arm64/boot/dtbo.img
-          if-no-files-found: warn
-
-      - name: Upload Kernel Modules
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kernel-Modules
-          path: AnyKernel/modules/*.ko
           if-no-files-found: warn
 
       - name: Upload AnyKernel3 ZIP

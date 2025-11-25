@@ -1,97 +1,79 @@
-name: Build Module Only (MODULE_DIR) + AnyKernel
+name: Kernel Build
 
 on:
-  push:
-    branches: ["main"]
   workflow_dispatch:
-
-env:
-  ARCH: arm64
-  KBUILD_OUTPUT: out
-  DEFCONFIG: obiwan_defconfig
-  MODULE_DIR: kernel/out_of_tree/kaeto_mod
+  push:
+    branches:
+      - main
 
 jobs:
-  build-module:
+  build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Install dependencies
+      # -----------------------------------------------------
+      # INSTALL DEPENDENCIES
+      # -----------------------------------------------------
+      - name: Install build deps
         run: |
-          sudo apt update
-          sudo apt install -y bc build-essential curl wget unzip git ccache \
-            python3 python-is-python3 rsync zip zstd \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang lld
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            libssl-dev bc bison flex libncurses5-dev dwarves ccache unzip
 
-      - name: Download AOSP Clang
+      # -----------------------------------------------------
+      # DOWNLOAD CLANG TOOLCHAIN
+      # -----------------------------------------------------
+      - name: Download Clang 17
         run: |
-          mkdir -p clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r530567.tar.gz -O clang.tar.gz
-          tar -xzf clang.tar.gz -C clang --strip-components=1
-          echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
-          echo "$PWD/clang/bin" >> $GITHUB_PATH
+          mkdir clang
+          wget https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          tar -xf clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz --strip-components=1 -C clang
 
-      - name: Print environment
+      # -----------------------------------------------------
+      # EXPORT TOOLCHAIN VARS (THIS FIXES YOUR GCC ERROR)
+      # -----------------------------------------------------
+      - name: Set LLVM env
         run: |
-          echo "Using defconfig: $DEFCONFIG"
-          echo "Module dir: $MODULE_DIR"
-          $CLANG_PATH/bin/clang --version | head -n 1 || true
-          aarch64-linux-gnu-gcc --version | head -n 1 || true
+          echo "CLANG_PATH=$GITHUB_WORKSPACE/clang" >> $GITHUB_ENV
+          echo "PATH=$GITHUB_WORKSPACE/clang/bin:$PATH" >> $GITHUB_ENV
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "CXX=clang++" >> $GITHUB_ENV
+          echo "LD=ld.lld" >> $GITHUB_ENV
+          echo "AR=llvm-ar" >> $GITHUB_ENV
+          echo "NM=llvm-nm" >> $GITHUB_ENV
+          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
+          echo "STRIP=llvm-strip" >> $GITHUB_ENV
+          echo "READELF=llvm-readelf" >> $GITHUB_ENV
+          echo "HOSTCC=clang" >> $GITHUB_ENV
+          echo "HOSTCXX=clang++" >> $GITHUB_ENV
 
-      - name: Prepare kernel (defconfig + modules_prepare)
+      # -----------------------------------------------------
+      # BUILD STARTS HERE
+      # -----------------------------------------------------
+      - name: Make defconfig
         run: |
-          export PATH="$CLANG_PATH/bin:$PATH"
-          export CC=clang
-          export ARCH=arm64
-          make O=${KBUILD_OUTPUT} ARCH=${ARCH} ${DEFCONFIG}
-          make -C . O=${KBUILD_OUTPUT} ARCH=${ARCH} modules_prepare
+          mkdir -p out
+          make LLVM=1 LLVM_IAS=1 ARCH=arm64 \
+            O=out \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            obiwan_defconfig
 
-      - name: Confirm module directory exists
+      - name: Build kernel + modules
         run: |
-          if [ ! -d "${MODULE_DIR}" ]; then
-            echo "ERROR: Module directory '${MODULE_DIR}' not found."
-            exit 1
-          fi
-          ls -la "${MODULE_DIR}"
+          make -j$(nproc) LLVM=1 LLVM_IAS=1 ARCH=arm64 \
+            O=out
 
-      - name: Build out-of-tree module(s)
-        run: |
-          export PATH="$CLANG_PATH/bin:$PATH"
-          export CC=clang
-          export ARCH=arm64
-          make -C . O=${KBUILD_OUTPUT} M="${MODULE_DIR}" CC="$CLANG_PATH/bin/clang" -j$(nproc)
-          mkdir -p out/modules
-          cp -v "${MODULE_DIR}"/*.ko out/modules/ || true
-          ls -la out/modules
-
-      - name: Clone AnyKernel3 for packaging
-        run: |
-          rm -rf AnyKernel || true
-          git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
-          rm -rf AnyKernel/.git
-
-      - name: Copy .ko into AnyKernel
-        run: |
-          mkdir -p AnyKernel/modules
-          cp -v out/modules/*.ko AnyKernel/modules/ || true
-          find AnyKernel/modules -type f
-
-      - name: Create AnyKernel zip
-        run: |
-          cd AnyKernel
-          zip -r9 ../AnyKernel-module-${GITHUB_SHA}.zip .
-
-      - name: Upload artifact
+      # -----------------------------------------------------
+      # UPLOAD .KO FILES
+      # -----------------------------------------------------
+      - name: Upload modules
         uses: actions/upload-artifact@v4
         with:
-          name: module-artifacts
-          path: |
-            out/modules/*.ko
-            AnyKernel-module-*.zip
-          if-no-files-found: error
+          name: kernel-modules
+          path: out/**/*.ko

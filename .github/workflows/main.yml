@@ -41,89 +41,88 @@ jobs:
         run: |
           echo "Using defconfig: $DEFCONFIG"
           echo "Module dir: $MODULE_DIR"
-          clang --version | head -n 2
+          $CLANG_PATH/bin/clang --version | head -n 1 || true
+          aarch64-linux-gnu-gcc --version | head -n 1 || true
 
-      - name: Prepare kernel (modules_prepare)
+      - name: Prepare kernel (defconfig + modules_prepare)
         run: |
           export PATH="$CLANG_PATH/bin:$PATH"
           export CC=clang
+          export ARCH=arm64
+          # write the defconfig into O=${KBUILD_OUTPUT}
           make O=${KBUILD_OUTPUT} ARCH=${ARCH} ${DEFCONFIG}
+          # prepare headers for out-of-tree builds (does NOT build full kernel)
           make -C . O=${KBUILD_OUTPUT} ARCH=${ARCH} modules_prepare
 
-      - name: Ensure module dir or create example module
+      - name: Check module directory exists
         run: |
-          export MODULE_DIR="$MODULE_DIR"
-          if [ ! -d "$MODULE_DIR" ]; then
-            echo "Module directory missing. Creating example module."
-            mkdir -p "$MODULE_DIR"
-
-            cat > "$MODULE_DIR/kaeto_mod.c" << 'C_SRC'
-/* kaeto_mod.c - safe example char device */ 
-
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/fs.h>
-#include <linux/uaccess.h>
-
-#define DEVICE_NAME "kaeto"
-static int major;
-
-static ssize_t dummy_read(struct file *f, char __user *buf, size_t len, loff_t *off) {
-    const char msg[] = "kaeto example\n";
-    return simple_read_from_buffer(buf, len, off, msg, sizeof(msg)-1);
-}
-
-static const struct file_operations fops = {
-    .owner = THIS_MODULE,
-    .read  = dummy_read,
-};
-
-static int __init kaeto_init(void) {
-    major = register_chrdev(0, DEVICE_NAME, &fops);
-    pr_info("kaeto example loaded (major=%d)\n", major);
-    return 0;
-}
-
-static void __exit kaeto_exit(void) {
-    unregister_chrdev(major, DEVICE_NAME);
-    pr_info("kaeto example unloaded\n");
-}
-
-module_init(kaeto_init);
-module_exit(kaeto_exit);
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Example");
-MODULE_DESCRIPTION("Safe demo module");
-C_SRC
-
-            cat > "$MODULE_DIR/Makefile" << 'MK'
-obj-m := kaeto_mod.o
-MK
+          if [ ! -d "${MODULE_DIR}" ]; then
+            echo "ERROR: Module directory '${MODULE_DIR}' not found in repo."
+            echo "Please add your module source at that path (e.g. ${MODULE_DIR}/<your>.c and Makefile)."
+            exit 1
           fi
+          echo "Module directory found: ${MODULE_DIR}"
+          ls -la "${MODULE_DIR}" || true
 
-      - name: Build module
+      - name: Build out-of-tree module(s)
         run: |
           export PATH="$CLANG_PATH/bin:$PATH"
-          make -C . O=${KBUILD_OUTPUT} M="$MODULE_DIR" CC=clang -j$(nproc)
+          export CC=clang
+          export ARCH=arm64
+          make -C . O=${KBUILD_OUTPUT} M="${MODULE_DIR}" CC="$CLANG_PATH/bin/clang" -j$(nproc) || (echo "module build failed" && exit 1)
           mkdir -p out/modules
-          cp -v "$MODULE_DIR"/*.ko out/modules/
+          cp -v "${MODULE_DIR}"/*.ko out/modules/ 2>/dev/null || true
+          echo "Built modules:"
+          ls -la out/modules || true
 
-      - name: Clone AnyKernel3
+      - name: Optionally sign modules (if secrets provided)
+        if: ${{ secrets.MODULE_SIGN_KEY != '' && secrets.MODULE_SIGN_CERT != '' }}
+        env:
+          PATH: ${{ env.PATH }}
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
-          rm -rf AnyKernel/.git
+          echo "${{ secrets.MODULE_SIGN_KEY }}" > sign_key.pem
+          echo "${{ secrets.MODULE_SIGN_CERT }}" > sign_cert.pem
+          chmod 600 sign_key.pem
+          for ko in out/modules/*.ko; do
+            if [ -f "$ko" ]; then
+              echo "Signing $ko"
+              scripts/sign-file sha512 sign_key.pem sign_cert.pem "$ko" || (echo "sign failed" && exit 1)
+            fi
+          done
+          rm -f sign_key.pem sign_cert.pem
 
-      - name: Package into AnyKernel
+      - name: Clone AnyKernel3 for packaging
+        run: |
+          rm -rf AnyKernel || true
+          git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
+          rm -rf AnyKernel/.git || true
+
+      - name: Copy .ko into AnyKernel and add simple loader
         run: |
           mkdir -p AnyKernel/modules
-          cp -v out/modules/*.ko AnyKernel/modules/
+          cp -v out/modules/*.ko AnyKernel/modules/ 2>/dev/null || true
+          mkdir -p AnyKernel/ramdisk_patch
+          cat > AnyKernel/ramdisk_patch/service.sh <<'SH'
+#!/system/bin/sh
+# Safe loader: attempt to insmod modules from standard locations (no signature bypass).
+insmod /vendor/lib/modules/*.ko 2>/dev/null || true
+insmod /system/lib/modules/*.ko 2>/dev/null || true
+insmod /lib/modules/*.ko 2>/dev/null || true
+SH
+          chmod 755 AnyKernel/ramdisk_patch/service.sh
+          echo "AnyKernel modules:"
+          find AnyKernel/modules -type f -name '*.ko' -print || true
+
+      - name: Create AnyKernel module zip
+        run: |
           cd AnyKernel
           zip -r9 ../AnyKernel-module-${GITHUB_SHA}.zip ./*
 
-      - name: Upload artifacts
+      - name: Upload module artifacts (.ko + zip)
         uses: actions/upload-artifact@v4
         with:
           name: module-artifacts
           path: |
             out/modules/*.ko
             AnyKernel-module-*.zip
+          if-no-files-found: error

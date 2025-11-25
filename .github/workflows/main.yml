@@ -1,4 +1,4 @@
-name: Kernel Build
+name: Kernel Build (Clang + GCC toolchain)
 
 on:
   workflow_dispatch:
@@ -9,71 +9,107 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # -----------------------------------------------------
-      # INSTALL DEPENDENCIES
-      # -----------------------------------------------------
-      - name: Install build deps
+      - name: Install host packages
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            libssl-dev bc bison flex libncurses5-dev dwarves ccache unzip
+            bc build-essential curl wget unzip git ccache \
+            python3 python-is-python3 rsync zip zstd libssl-dev libncurses5-dev
 
-      # -----------------------------------------------------
-      # DOWNLOAD CLANG TOOLCHAIN
-      # -----------------------------------------------------
-      - name: Download Clang 17
+      - name: Download AOSP Clang (stable)
         run: |
-          mkdir clang
-          wget https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          tar -xf clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz --strip-components=1 -C clang
+          mkdir -p toolchains/clang
+          # AOSP clang tarball (change if you prefer proton-clang or other)
+          CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r530567.tar.gz"
+          wget -q "$CLANG_URL" -O clang.tar.gz
+          tar -xzf clang.tar.gz -C toolchains/clang --strip-components=1
+          rm -f clang.tar.gz
+          echo "CLANG_PATH=$PWD/toolchains/clang" >> $GITHUB_ENV
+          echo "$PWD/toolchains/clang/bin" >> $GITHUB_PATH
 
-      # -----------------------------------------------------
-      # EXPORT TOOLCHAIN VARS (THIS FIXES YOUR GCC ERROR)
-      # -----------------------------------------------------
-      - name: Set LLVM env
+      - name: Download Linaro aarch64 GCC cross toolchain
         run: |
-          echo "CLANG_PATH=$GITHUB_WORKSPACE/clang" >> $GITHUB_ENV
-          echo "PATH=$GITHUB_WORKSPACE/clang/bin:$PATH" >> $GITHUB_ENV
-          echo "CC=clang" >> $GITHUB_ENV
-          echo "CXX=clang++" >> $GITHUB_ENV
-          echo "LD=ld.lld" >> $GITHUB_ENV
-          echo "AR=llvm-ar" >> $GITHUB_ENV
-          echo "NM=llvm-nm" >> $GITHUB_ENV
-          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
-          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
-          echo "STRIP=llvm-strip" >> $GITHUB_ENV
-          echo "READELF=llvm-readelf" >> $GITHUB_ENV
-          echo "HOSTCC=clang" >> $GITHUB_ENV
-          echo "HOSTCXX=clang++" >> $GITHUB_ENV
+          mkdir -p toolchains/gcc
+          # Linaro GCC (7.5) is a commonly used cross toolchain; replace if you need a different one.
+          GCC_URL="https://releases.linaro.org/components/toolchain/binaries/latest/7/aarch64-linux-gnu/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu.tar.xz"
+          wget -q "$GCC_URL" -O gcc.tar.xz
+          tar -xf gcc.tar.xz -C toolchains/gcc --strip-components=1
+          rm -f gcc.tar.xz
+          # GCC_TOOLCHAIN should point to the root that contains bin/aarch64-linux-gnu-gcc
+          echo "GCC_TOOLCHAIN=$PWD/toolchains/gcc" >> $GITHUB_ENV
+          echo "$PWD/toolchains/gcc/bin" >> $GITHUB_PATH
 
-      # -----------------------------------------------------
-      # BUILD STARTS HERE
-      # -----------------------------------------------------
-      - name: Make defconfig
+      - name: Print toolchain info
         run: |
+          echo "CLANG_PATH=$CLANG_PATH"
+          echo "GCC_TOOLCHAIN=$GCC_TOOLCHAIN"
+          "$CLANG_PATH/bin/clang" --version | head -n 1 || true
+          "$GCC_TOOLCHAIN/bin/aarch64-linux-gnu-gcc" --version | head -n 1 || true
+          ls -la "$GCC_TOOLCHAIN/bin" | head -n 30
+
+      - name: Prepare kernel defconfig and headers (modules_prepare)
+        env:
+          PATH: ${{ env.PATH }}
+        run: |
+          export PATH="$CLANG_PATH/bin:$GCC_TOOLCHAIN/bin:$PATH"
+          export CC=clang
+          export CXX=clang++
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export LD=ld.lld
+          export OBJDUMP=llvm-objdump
+          export OBJCOPY=llvm-objcopy
+          export STRIP=llvm-strip
+          export HOSTCC=clang
+          export HOSTCXX=clang++
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export GCC_TOOLCHAIN="$GCC_TOOLCHAIN"
           mkdir -p out
-          make LLVM=1 LLVM_IAS=1 ARCH=arm64 \
-            O=out \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            obiwan_defconfig
+          # IMPORTANT: pass LLVM=1 and specify CLANG_TRIPLE & GCC_TOOLCHAIN so kernel Makefile
+          # injects proper --target and --gcc-toolchain flags for clang.
+          make O=out LLVM=1 LLVM_IAS=1 ARCH=arm64 obiwan_defconfig
+          make -C . O=out LLVM=1 LLVM_IAS=1 ARCH=arm64 modules_prepare
 
-      - name: Build kernel + modules
+      - name: Build kernel (Image + modules)
+        env:
+          PATH: ${{ env.PATH }}
         run: |
-          make -j$(nproc) LLVM=1 LLVM_IAS=1 ARCH=arm64 \
-            O=out
+          export PATH="$CLANG_PATH/bin:$GCC_TOOLCHAIN/bin:$PATH"
+          export CC=clang
+          export CXX=clang++
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export LD=ld.lld
+          export HOSTCC=clang
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export GCC_TOOLCHAIN="$GCC_TOOLCHAIN"
+          # Build kernel and modules. Adjust -j if needed.
+          make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 ARCH=arm64
 
-      # -----------------------------------------------------
-      # UPLOAD .KO FILES
-      # -----------------------------------------------------
-      - name: Upload modules
+      - name: List outputs
+        run: |
+          echo "kernel artifacts:"
+          ls -la out/arch/arm64/boot || true
+          echo "modules:"
+          find out -name '*.ko' -maxdepth 5 -print || true
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-modules
-          path: out/**/*.ko
+          name: kernel-artifacts
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/Image.gz-dtb
+            out/**/*.ko

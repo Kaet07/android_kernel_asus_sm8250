@@ -8,7 +8,7 @@ on:
 env:
   ARCH: arm64
   KBUILD_OUTPUT: out
-  DEFCONFIG: arch/arm64/configs/obiwan_defconfig
+  DEFCONFIG: obiwan_defconfig
   MODULE_DIR: kernel/out_of_tree/kaeto_mod
 
 jobs:

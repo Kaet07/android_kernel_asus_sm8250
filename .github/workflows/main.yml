@@ -28,10 +28,14 @@ jobs:
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi
 
-      - name: Download AOSP Clang
+      # ---------------------------------------------------------
+      # COMPATIBLE TOOLCHAIN FOR 4.19 KERNELS
+      # ---------------------------------------------------------
+
+      - name: Download Clang r416183b
         run: |
           mkdir -p clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r530567.tar.gz -O clang.tar.gz
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-12.0.0_r34/clang-r416183b.tar.gz -O clang.tar.gz
           tar -xzf clang.tar.gz -C clang
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH
@@ -52,7 +56,7 @@ jobs:
           make O=${KBUILD_OUTPUT} $DEFCONFIG
 
       # ---------------------------------------------------------
-      # BUILD KERNEL (WITH WARNINGS DISABLED)
+      # BUILD KERNEL
       # ---------------------------------------------------------
 
       - name: Build Kernel Image
@@ -66,7 +70,7 @@ jobs:
             CC="$CLANG_PATH/bin/clang"
 
       # ---------------------------------------------------------
-      # BUILD MODULES (ALSO DISABLE WERROR)
+      # BUILD MODULES
       # ---------------------------------------------------------
 
       - name: Build Kernel Modules
@@ -119,11 +123,9 @@ jobs:
             out/arch/arm64/boot/Image.gz
             out/arch/arm64/boot/Image.gz-dtb
             out/arch/arm64/boot/dtbo.img
-          if-no-files-found: warn
 
       - name: Upload AnyKernel3 ZIP
         uses: actions/upload-artifact@v4
         with:
           name: Flashable-AnyKernel3
           path: AnyKernel-*.zip
-          if-no-files-found: error

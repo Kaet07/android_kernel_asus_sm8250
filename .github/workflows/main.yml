@@ -49,16 +49,14 @@ jobs:
           export PATH="$CLANG_PATH/bin:$PATH"
           export CC=clang
           export ARCH=arm64
-          # write the defconfig into O=${KBUILD_OUTPUT}
           make O=${KBUILD_OUTPUT} ARCH=${ARCH} ${DEFCONFIG}
-          # prepare headers for out-of-tree builds (does NOT build full kernel)
           make -C . O=${KBUILD_OUTPUT} ARCH=${ARCH} modules_prepare
 
-      - name: Check module directory exists
+      - name: Confirm module directory exists
         run: |
           if [ ! -d "${MODULE_DIR}" ]; then
             echo "ERROR: Module directory '${MODULE_DIR}' not found in repo."
-            echo "Please add your module source at that path (e.g. ${MODULE_DIR}/<your>.c and Makefile)."
+            echo "Please add your module source at that path (example: ${MODULE_DIR}/mymodule.c and Makefile)."
             exit 1
           fi
           echo "Module directory found: ${MODULE_DIR}"
@@ -77,8 +75,6 @@ jobs:
 
       - name: Optionally sign modules (if secrets provided)
         if: ${{ secrets.MODULE_SIGN_KEY != '' && secrets.MODULE_SIGN_CERT != '' }}
-        env:
-          PATH: ${{ env.PATH }}
         run: |
           echo "${{ secrets.MODULE_SIGN_KEY }}" > sign_key.pem
           echo "${{ secrets.MODULE_SIGN_CERT }}" > sign_cert.pem
@@ -97,19 +93,10 @@ jobs:
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
           rm -rf AnyKernel/.git || true
 
-      - name: Copy .ko into AnyKernel and add simple loader
+      - name: Copy .ko into AnyKernel
         run: |
           mkdir -p AnyKernel/modules
           cp -v out/modules/*.ko AnyKernel/modules/ 2>/dev/null || true
-          mkdir -p AnyKernel/ramdisk_patch
-          cat > AnyKernel/ramdisk_patch/service.sh <<'SH'
-#!/system/bin/sh
-# Safe loader: attempt to insmod modules from standard locations (no signature bypass).
-insmod /vendor/lib/modules/*.ko 2>/dev/null || true
-insmod /system/lib/modules/*.ko 2>/dev/null || true
-insmod /lib/modules/*.ko 2>/dev/null || true
-SH
-          chmod 755 AnyKernel/ramdisk_patch/service.sh
           echo "AnyKernel modules:"
           find AnyKernel/modules -type f -name '*.ko' -print || true
 

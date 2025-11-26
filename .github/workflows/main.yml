@@ -27,49 +27,47 @@ jobs:
             libssl-dev python3 python-is-python3 \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi
+      # ---------------------------------------------------------
+      # GUARANTEED-WORKING AOSP LLVM TOOLCHAIN
+      # ---------------------------------------------------------
 
-      - name: Download Proton Clang
+      - name: Download AOSP Clang
         run: |
           mkdir -p clang
-          wget https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.zip -O clang.zip
-          unzip clang.zip -d clang
-          mv clang/proton-clang-master/* clang/
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r530567.tar.gz -O clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
           echo "CLANG_PATH=$PWD/clang" >> $GITHUB_ENV
+          echo "$PWD/clang/bin" >> $GITHUB_PATH
+      # ---------------------------------------------------------
+      # EXPORT TOOLCHAIN VARIABLES
+      # ---------------------------------------------------------
 
       - name: Export toolchain variables
         run: |
-          echo "CC=${CLANG_PATH}/bin/clang" >> $GITHUB_ENV
+          echo "CC=$CLANG_PATH/bin/clang" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+      # ---------------------------------------------------------
+      # BUILD DEFCONFIG
+      # ---------------------------------------------------------
 
       - name: Make defconfig
         run: |
           make O=${KBUILD_OUTPUT} $DEFCONFIG
+      # ---------------------------------------------------------
+      # BUILD KERNEL
+      # ---------------------------------------------------------
 
       - name: Build Kernel Image (Image.gz-dtb)
         run: |
           make -j$(nproc) \
             O=${KBUILD_OUTPUT} \
             ARCH=arm64 \
-            CC="${CLANG_PATH}/bin/clang"
-
-      - name: Build Kernel Modules
-        run: |
-          # build modules (disable Werror for modules to avoid techpack warnings failing the build)
-          make -j$(nproc) \
-            O=${KBUILD_OUTPUT} \
-            ARCH=arm64 \
-            KCFLAGS=-Wno-error \
-            modules
-
-      - name: Install Kernel Modules
-        run: |
-          # install modules into a separate folder so we can copy them into AnyKernel
-          make O=${KBUILD_OUTPUT} ARCH=arm64 modules_install INSTALL_MOD_PATH=modules_out
-          mkdir -p AnyKernel/modules
-          # copy any .ko to AnyKernel/modules
-          find modules_out -type f -name '*.ko' -exec cp -v {} AnyKernel/modules/ \; || true
+            CC="$CLANG_PATH/bin/clang"
+      # ---------------------------------------------------------
+      # BUILD DTBO
+      # ---------------------------------------------------------
 
       - name: Build DTBO image
         run: |
@@ -77,26 +75,27 @@ jobs:
             O=${KBUILD_OUTPUT} \
             ARCH=arm64 \
             dtboimg || true
+      # ---------------------------------------------------------
+      # ANYKERNEL PACKAGING
+      # ---------------------------------------------------------
 
       - name: Clone AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
-
       - name: Copy kernel output to AnyKernel3
         run: |
           cp out/arch/arm64/boot/Image.gz-dtb AnyKernel/ || true
           cp out/arch/arm64/boot/Image.gz AnyKernel/ || true
           cp out/arch/arm64/boot/Image AnyKernel/ || true
           cp out/arch/arm64/boot/dtbo.img AnyKernel/ || true
-          # ensure modules (if present) are included (redundant with Install step)
-          mkdir -p AnyKernel/modules
-          cp -v modules_out/lib/modules/*/*.ko AnyKernel/modules/ 2>/dev/null || true
-          cp -v modules_out/lib/modules/*.ko AnyKernel/modules/ 2>/dev/null || true
-
+          rm -f AnyKernel/patch AnyKernel/modules || true
       - name: Create flashable ZIP
         run: |
           cd AnyKernel
           zip -r9 ../AnyKernel-${GITHUB_SHA}.zip ./*
+      # ---------------------------------------------------------
+      # UPLOAD ARTIFACTS
+      # ---------------------------------------------------------
 
       - name: Upload Kernel Files
         uses: actions/upload-artifact@v4
@@ -107,13 +106,6 @@ jobs:
             out/arch/arm64/boot/Image.gz
             out/arch/arm64/boot/Image.gz-dtb
             out/arch/arm64/boot/dtbo.img
-          if-no-files-found: warn
-
-      - name: Upload Kernel Modules
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kernel-Modules
-          path: AnyKernel/modules/*.ko
           if-no-files-found: warn
 
       - name: Upload AnyKernel3 ZIP
